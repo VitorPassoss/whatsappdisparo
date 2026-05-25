@@ -29,7 +29,19 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  // Em produção, JWT_SECRET é obrigatório — sem ele, o middleware de auth
+  // assina/valida tokens com string vazia, gerando comportamento errático.
+  if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+    throw new Error(
+      "JWT_SECRET não configurado. Gere com `openssl rand -hex 32` e defina no .env antes de subir."
+    );
+  }
+
   const app = express();
+  // Atrás do Traefik (host network, faz TLS termination). Sem isso,
+  // req.protocol retorna 'http' e o cookie de sessão é setado sem Secure,
+  // o que faz Chrome rejeitar SameSite=None silenciosamente.
+  app.set("trust proxy", 1);
   const server = createServer(app);
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));

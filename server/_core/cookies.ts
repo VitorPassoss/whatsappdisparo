@@ -39,10 +39,17 @@ export function getSessionCookieOptions(
   //       ? hostname
   //       : undefined;
 
+  // Em produção, força Secure=true. Atrás do Traefik o tráfego pro browser
+  // é sempre HTTPS — mesmo que detecção via header falhe, o cookie precisa
+  // ir com Secure pra ser aceito pelo browser junto com SameSite=lax.
+  // Trocamos SameSite none → lax: app é same-origin (frontend e API no mesmo
+  // domínio painelapi.online), lax é o padrão correto e mais seguro.
+  const secure = process.env.NODE_ENV === "production" ? true : isSecureRequest(req);
+
   return {
     httpOnly: true,
     path: "/",
-    sameSite: "none",
-    secure: isSecureRequest(req),
+    sameSite: "lax",
+    secure,
   };
 }
