@@ -1,0 +1,82 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Stack: WhatsApp Disparador Painel (painelapi.online)
+# Reverse proxy: Traefik (rodando fora deste stack, na rede ${TRAEFIK_NETWORK})
+# Banco: MySQL 8 isolado, sem porta exposta no host
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  db:
+    image: mysql:8.4
+    container_name: ${APP_NAME}-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      TZ: America/Sao_Paulo
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=caching_sha2_password
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${DB_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${APP_NAME}:latest
+    container_name: ${APP_NAME}-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      TZ: America/Sao_Paulo
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASSWORD}@db:3306/${DB_NAME}
+      JWT_SECRET: ${JWT_SECRET}
+      WHATSAPP_WEBHOOK_TOKEN: ${WHATSAPP_WEBHOOK_TOKEN}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET}
+      OWNER_OPEN_ID: ${OWNER_OPEN_ID}
+      VITE_APP_ID: ${VITE_APP_ID}
+    networks:
+      - internal
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK}"
+      # Router HTTPS
+      - "traefik.http.routers.${APP_NAME}.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.${APP_NAME}.entrypoints=websecure"
+      - "traefik.http.routers.${APP_NAME}.tls=true"
+      - "traefik.http.routers.${APP_NAME}.tls.certresolver=letsencrypt"
+      - "traefik.http.services.${APP_NAME}.loadbalancer.server.port=3000"
+      # Redirect HTTP → HTTPS
+      - "traefik.http.routers.${APP_NAME}-http.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.${APP_NAME}-http.entrypoints=web"
+      - "traefik.http.routers.${APP_NAME}-http.middlewares=${APP_NAME}-redirect"
+      - "traefik.http.middlewares.${APP_NAME}-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.${APP_NAME}-redirect.redirectscheme.permanent=true"
+
+volumes:
+  db_data:
+    name: ${APP_NAME}_db_data
+
+networks:
+  internal:
+    name: ${APP_NAME}_internal
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK}

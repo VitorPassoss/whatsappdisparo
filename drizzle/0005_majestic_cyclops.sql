@@ -1,0 +1,2 @@
+ALTER TABLE `campaigns` MODIFY COLUMN `status` enum('pending','running','completed','failed','scheduled','cancelled') NOT NULL DEFAULT 'pending';--> statement-breakpoint
+ALTER TABLE `campaigns` ADD `scheduledAt` timestamp;

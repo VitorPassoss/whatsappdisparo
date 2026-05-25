@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `credits` int DEFAULT 50 NOT NULL;

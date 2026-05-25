@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="pt-BR">
+
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <title>Painel de Disparos WhatsApp</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+
+    <!-- Anti-Inspection Protection -->
+    <script>
+      (function() {
+        'use strict';
+
+        // Disable right-click context menu
+        document.addEventListener('contextmenu', function(e) {
+          e.preventDefault();
+          return false;
+        });
+
+        // Disable keyboard shortcuts for DevTools and source viewing
+        document.addEventListener('keydown', function(e) {
+          // F12
+          if (e.key === 'F12' || e.keyCode === 123) {
+            e.preventDefault();
+            return false;
+          }
+          // Ctrl+Shift+I (DevTools)
+          if (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i' || e.keyCode === 73)) {
+            e.preventDefault();
+            return false;
+          }
+          // Ctrl+Shift+J (Console)
+          if (e.ctrlKey && e.shiftKey && (e.key === 'J' || e.key === 'j' || e.keyCode === 74)) {
+            e.preventDefault();
+            return false;
+          }
+          // Ctrl+Shift+C (Inspector)
+          if (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c' || e.keyCode === 67)) {
+            e.preventDefault();
+            return false;
+          }
+          // Ctrl+U (View Source)
+          if (e.ctrlKey && (e.key === 'U' || e.key === 'u' || e.keyCode === 85)) {
+            e.preventDefault();
+            return false;
+          }
+          // Ctrl+S (Save Page)
+          if (e.ctrlKey && (e.key === 'S' || e.key === 's' || e.keyCode === 83)) {
+            e.preventDefault();
+            return false;
+          }
+          // Ctrl+A (Select All) - optional, uncomment if needed
+          // if (e.ctrlKey && (e.key === 'A' || e.key === 'a' || e.keyCode === 65)) {
+          //   e.preventDefault();
+          //   return false;
+          // }
+        });
+
+        // Detect DevTools open via window size difference
+        var devtoolsOpen = false;
+        var threshold = 160;
+
+        function checkDevTools() {
+          var widthDiff = window.outerWidth - window.innerWidth;
+          var heightDiff = window.outerHeight - window.innerHeight;
+          if (widthDiff > threshold || heightDiff > threshold) {
+            if (!devtoolsOpen) {
+              devtoolsOpen = true;
+              // Clear page content when DevTools is detected
+              document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0a0a0a;color:#22c55e;font-family:Inter,sans-serif;flex-direction:column;gap:16px;"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><h2 style="font-size:1.5rem;font-weight:700;margin:0;">Acesso Restrito</h2><p style="color:#6b7280;margin:0;text-align:center;">Esta ferramenta é protegida contra inspeção.<br/>Feche o DevTools para continuar.</p></div>';
+            }
+          } else {
+            if (devtoolsOpen) {
+              devtoolsOpen = false;
+              window.location.reload();
+            }
+          }
+        }
+
+        setInterval(checkDevTools, 1000);
+
+        // Disable text selection on sensitive elements (applied via CSS)
+        var style = document.createElement('style');
+        style.innerHTML = [
+          '* { -webkit-tap-highlight-color: transparent; }',
+          'body { -webkit-touch-callout: none; }',
+          '.no-select { -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none; }',
+          'img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }',
+        ].join('\n');
+        document.head.appendChild(style);
+
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script
+      defer
+      src="%VITE_ANALYTICS_ENDPOINT%/umami"
+      data-website-id="%VITE_ANALYTICS_WEBSITE_ID%"></script>
+  </body>
+
+</html>
