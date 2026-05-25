@@ -57,29 +57,27 @@ Personal Access Token (Settings → Developer settings → Personal access token
 → Fine-grained) com escopo de leitura no repo, e cole como senha. Ou cadastre
 uma deploy key SSH dedicada e use `git@github.com:VitorPassoss/whatsappdisparo.git`.
 
-## 4. Configurar `.env`
+## 4. Configurar `.env` (one-liner — sem nano)
+
+Só precisamos de 3 secrets de bootstrap (DB + JWT). Facebook keys e webhook
+token são editados depois pela UI, sem reiniciar o container:
 
 ```bash
 cp .env.example .env
 
-# Gera secrets fortes
-DB_ROOT=$(openssl rand -hex 16)
-DB_PASS=$(openssl rand -hex 16)
-JWT=$(openssl rand -hex 32)
-WEBHOOK=$(openssl rand -hex 24)
+# Gera e injeta os 3 secrets críticos numa tacada só
+sed -i \
+  -e "0,/trocar_openssl_rand_hex_16/{s||$(openssl rand -hex 16)|}" \
+  -e "0,/trocar_openssl_rand_hex_16/{s||$(openssl rand -hex 16)|}" \
+  -e "s|trocar_openssl_rand_hex_32|$(openssl rand -hex 32)|" \
+  .env
 
-# Substitui no .env (sed in-place)
-sed -i "s|trocar_openssl_rand_hex_16|$DB_ROOT|"  .env   # primeira ocorrência: DB_PASSWORD
-sed -i "s|trocar_openssl_rand_hex_16|$DB_PASS|"  .env   # segunda: DB_ROOT_PASSWORD
-sed -i "s|trocar_openssl_rand_hex_32|$JWT|"      .env
-sed -i "s|trocar_token_qualquer_string_aleatoria|$WEBHOOK|" .env
-
-# Preenche secrets do Facebook (cole os valores ou edite manualmente)
-nano .env
+# Confirma que não sobrou nenhum placeholder
+grep "trocar_" .env && echo "AINDA TEM PLACEHOLDER" || echo "OK"
 ```
 
-Confirme com `cat .env` antes de prosseguir. Anote o `WHATSAPP_WEBHOOK_TOKEN`
-— você vai precisar dele no Meta App Dashboard ao registrar o webhook.
+Pronto. Não precisa abrir nano. Tudo que sobrar (Facebook App ID/Secret,
+webhook token, APP_ORIGIN) você configura pela UI no passo 8.
 
 ## 5. Verificações pré-up
 
@@ -122,7 +120,7 @@ docker compose exec app pnpm exec drizzle-kit migrate
 > Se o comando reclamar de `DATABASE_URL`, confirme que o container `app`
 > tem a env: `docker compose exec app env | grep DATABASE_URL`.
 
-## 8. Smoke test
+## 8. Smoke test + Configuração via UI
 
 ```bash
 # Cert e proxy funcionando?
@@ -134,19 +132,41 @@ curl -s https://painelapi.online/privacy | head -3
 # Esperar: <!DOCTYPE html><html lang="pt-BR">
 ```
 
-Acessa o painel em https://painelapi.online no navegador, registra o
-primeiro usuário (vira admin se `OWNER_OPEN_ID` bater com o openId gerado
-após o primeiro login).
+Agora, no navegador:
+
+1. Acessa https://painelapi.online → cria a primeira conta. **O primeiro
+   usuário a se registrar vira admin automaticamente** (auto-promote ativo
+   enquanto a tabela `users` não tem nenhum admin).
+2. Vai em **Sidebar → Admin → Configurações** (ou direto em
+   https://painelapi.online/admin/settings).
+3. Preenche:
+   - **APP_ORIGIN**: `https://painelapi.online`
+   - **FACEBOOK_APP_ID** + **FACEBOOK_APP_SECRET**: vêm do Meta App Dashboard
+     → App Settings → Basic
+   - **WHATSAPP_WEBHOOK_TOKEN**: gera uma string aleatória (sugestão:
+     `openssl rand -hex 24` no terminal local) e cola. Vai precisar do mesmo
+     valor no Meta no próximo passo.
+   - **OWNER_OPEN_ID**: deixa vazio.
+4. Mudanças entram em vigor em até **30 segundos** (TTL do cache de settings).
 
 ## 9. Configurar o webhook no Meta App
 
-No Meta App Dashboard → Webhooks → WhatsApp:
+A página `/admin/settings` mostra no topo o **Redirect URI** que você precisa
+colar no Meta. Em paralelo, registra o webhook:
+
+No Meta App Dashboard → WhatsApp → Configuração:
 
 - **Callback URL**: `https://painelapi.online/api/webhook/whatsapp`
-- **Verify token**: o mesmo valor de `WHATSAPP_WEBHOOK_TOKEN` no `.env`
+- **Verify token**: o mesmo valor de `WHATSAPP_WEBHOOK_TOKEN` que você salvou
+  na UI no passo 8
 
-Click em **Verify and save**. O endpoint GET responde 200 com `hub.challenge`
+Clica em **Verify and save**. O endpoint GET responde 200 com `hub.challenge`
 quando o token bate (ver `server/_core/index.ts:130`).
+
+E no **Facebook Login → Settings → Valid OAuth Redirect URIs** cola:
+```
+https://painelapi.online/auth/facebook/callback
+```
 
 ## 10. Updates futuros
 
@@ -158,6 +178,11 @@ docker compose up -d --build
 # Se houve schema change:
 docker compose exec app pnpm exec drizzle-kit migrate
 ```
+
+A tabela `app_settings` é criada automaticamente no boot do app
+(`CREATE TABLE IF NOT EXISTS`), então mudanças nela não precisam de migration.
+Tudo que o admin configurou pela UI persiste no volume `disparos_db_data` e
+sobrevive a redeploys.
 
 ## 11. Rollback
 

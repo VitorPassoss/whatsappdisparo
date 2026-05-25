@@ -42,6 +42,7 @@ import {
   updateSessionWabaId,
   updateUserPasswordHash,
   upsertUser,
+  countAdmins,
 } from "./db";
 import bcrypt from "bcryptjs";
 import { sdk } from "./_core/sdk";
@@ -51,6 +52,7 @@ import {
   sendWhatsAppMessage,
   sendWhatsAppTemplate,
 } from "./whatsapp-send";
+import { getAllSettings, setSetting, type SettingKey } from "./settings";
 
 // ─── WhatsApp Template metadata fetcher ─────────────────────────────────────
 
@@ -665,10 +667,49 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   return next({ ctx });
 });
 
+// Lista das chaves que admin pode editar via UI. Bootstrap (DATABASE_URL,
+// JWT_SECRET, NODE_ENV, PORT) NÃO entram aqui de propósito.
+const EDITABLE_SETTING_KEYS = [
+  "FACEBOOK_APP_ID",
+  "FACEBOOK_APP_SECRET",
+  "WHATSAPP_WEBHOOK_TOKEN",
+  "APP_ORIGIN",
+  "OWNER_OPEN_ID",
+] as const satisfies readonly SettingKey[];
+
+const settingKeySchema = z.enum(EDITABLE_SETTING_KEYS);
+
 const adminRouter = router({
   listUsers: adminProcedure.query(async () => {
     return getAllUsers();
   }),
+
+  listSettings: adminProcedure.query(async () => {
+    const all = await getAllSettings();
+    // Mascarar valores sensíveis na resposta — só revela tamanho do segredo
+    // pra confirmar que está configurado, sem expor pra quem abriu devtools.
+    const SECRET_KEYS = new Set<SettingKey>([
+      "FACEBOOK_APP_SECRET",
+      "WHATSAPP_WEBHOOK_TOKEN",
+    ]);
+    return EDITABLE_SETTING_KEYS.map((key) => {
+      const raw = all[key] ?? "";
+      const isSecret = SECRET_KEYS.has(key);
+      return {
+        key,
+        value: isSecret ? "" : raw,
+        hasValue: raw.length > 0,
+        masked: isSecret,
+      };
+    });
+  }),
+
+  updateSetting: adminProcedure
+    .input(z.object({ key: settingKeySchema, value: z.string().max(2048) }))
+    .mutation(async ({ input }) => {
+      await setSetting(input.key, input.value);
+      return { success: true };
+    }),
 
   setCredits: adminProcedure
     .input(z.object({ userId: z.number(), credits: z.number().min(0).max(999999) }))
@@ -729,6 +770,12 @@ export const appRouter = router({
         const user = await getUserByEmail(input.email.toLowerCase());
         if (!user) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         await updateUserPasswordHash(user.id, passwordHash);
+        // Bootstrap: se não existe nenhum admin ainda, promove este usuário.
+        // Garante que o primeiro signup numa instalação nova já vira admin
+        // e consegue acessar /admin/settings pra configurar tudo via UI.
+        if ((await countAdmins()) === 0) {
+          await setUserRole(user.id, "admin");
+        }
         // Create session
         const sessionToken = await sdk.createSessionToken(openId, { name: input.name, expiresInMs: ONE_YEAR_MS });
         const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -753,6 +800,11 @@ export const appRouter = router({
           throw new TRPCError({ code: "UNAUTHORIZED", message: "E-mail ou senha incorretos." });
         }
         await upsertUser({ openId: user.openId, lastSignedIn: new Date() });
+        // Rede de segurança: se a instalação ficou sem admin (ex: register
+        // crashou antes da promoção), promove no primeiro login válido.
+        if ((await countAdmins()) === 0) {
+          await setUserRole(user.id, "admin");
+        }
         const sessionToken = await sdk.createSessionToken(user.openId, { name: user.name ?? "", expiresInMs: ONE_YEAR_MS });
         const cookieOptions = getSessionCookieOptions(ctx.req);
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });

@@ -167,6 +167,20 @@ export const automationSteps = mysqlTable("automation_steps", {
 export type AutomationStep = typeof automationSteps.$inferSelect;
 export type InsertAutomationStep = typeof automationSteps.$inferInsert;
 
+// Configurações editáveis em runtime via UI admin.
+// Substituem variáveis de ambiente que mudavam com frequência
+// (Facebook App ID/Secret, webhook token, origem pública etc).
+// O DATABASE_URL e JWT_SECRET permanecem no .env por serem
+// dependências de bootstrap.
+export const appSettings = mysqlTable("app_settings", {
+  key: varchar("key", { length: 64 }).primaryKey(),
+  value: text("value"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type AppSetting = typeof appSettings.$inferSelect;
+export type InsertAppSetting = typeof appSettings.$inferInsert;
+
 // Registro de contatos que já receberam um funil (evita reenvio)
 export const automationLogs = mysqlTable("automation_logs", {
   id: int("id").autoincrement().primaryKey(),

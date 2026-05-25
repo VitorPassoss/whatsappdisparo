@@ -1,5 +1,6 @@
 import { and, desc, eq, gte, like, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2/promise";
 import {
   CampaignContact,
   InsertCampaignContact,
@@ -17,6 +18,7 @@ import {
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
+let _rawPool: mysql.Pool | null = null;
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
@@ -28,6 +30,26 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/**
+ * Acesso de baixo nível pra executar SQL cru — usado pelo módulo de
+ * settings pra `CREATE TABLE IF NOT EXISTS` no boot, sem depender de
+ * `drizzle-kit migrate` rodar primeiro.
+ */
+export async function getRawConnection(): Promise<mysql.Pool | null> {
+  if (!_rawPool && process.env.DATABASE_URL) {
+    try {
+      _rawPool = mysql.createPool({
+        uri: process.env.DATABASE_URL,
+        connectionLimit: 5,
+      });
+    } catch (error) {
+      console.warn("[Database] Failed to create raw pool:", error);
+      _rawPool = null;
+    }
+  }
+  return _rawPool;
 }
 
 // ─── Users ───────────────────────────────────────────────────────────────────
@@ -688,4 +710,18 @@ export async function setUserRole(userId: number, role: "user" | "admin"): Promi
   const db = await getDb();
   if (!db) return;
   await db.update(users).set({ role }).where(eq(users.id, userId));
+}
+
+/**
+ * Conta admins. Usado pra detectar instalação nova (zero admins) e
+ * auto-promover o primeiro usuário que logar.
+ */
+export async function countAdmins(): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(users)
+    .where(eq(users.role, "admin"));
+  return Number(rows[0]?.count ?? 0);
 }

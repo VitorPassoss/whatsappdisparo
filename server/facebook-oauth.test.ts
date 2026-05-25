@@ -1,18 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * Tests for Facebook OAuth routes
- * We test the logic by simulating the Express request/response objects
- * and mocking the fetch calls to the Facebook Graph API.
+ * Tests for Facebook OAuth routes.
+ * Mocks the `./settings` module (which now owns Facebook credentials and
+ * the public APP_ORIGIN) and the fetch calls to the Graph API.
  */
 
-// Mock ENV
-vi.mock("./_core/env", () => ({
-  ENV: {
-    facebookAppId: "test_app_id_123",
-    facebookAppSecret: "test_app_secret_456",
-    isProduction: false,
-  },
+// Mock settings — credenciais agora vêm do banco via getSetting()
+vi.mock("./settings", () => ({
+  getSetting: vi.fn(async (key: string) => {
+    if (key === "FACEBOOK_APP_ID") return "test_app_id_123";
+    if (key === "FACEBOOK_APP_SECRET") return "test_app_secret_456";
+    if (key === "APP_ORIGIN") return "https://painelapi.online";
+    return null;
+  }),
 }));
 
 // Mock fetch globally
@@ -24,9 +25,18 @@ const { registerFacebookOAuthRoutes } = await import("./facebook-oauth");
 
 // Minimal Express mock
 function createMockReq(overrides: Record<string, unknown> = {}) {
+  const headers: Record<string, string> = {
+    host: "painelapi.online",
+    "x-forwarded-proto": "https",
+    ...((overrides.headers as Record<string, string>) ?? {}),
+  };
   return {
     query: {},
     body: {},
+    protocol: "https",
+    get(name: string) {
+      return headers[name.toLowerCase()];
+    },
     ...overrides,
   };
 }
@@ -49,12 +59,12 @@ function createMockRes() {
 
 // Minimal Express app mock
 function createMockApp() {
-  const routes: Record<string, (req: ReturnType<typeof createMockReq>, res: ReturnType<typeof createMockRes>) => void> = {};
+  const routes: Record<string, (req: ReturnType<typeof createMockReq>, res: ReturnType<typeof createMockRes>) => Promise<void> | void> = {};
   return {
-    get(path: string, handler: (req: ReturnType<typeof createMockReq>, res: ReturnType<typeof createMockRes>) => void) {
+    get(path: string, handler: (req: ReturnType<typeof createMockReq>, res: ReturnType<typeof createMockRes>) => Promise<void> | void) {
       routes[`GET:${path}`] = handler;
     },
-    post(path: string, handler: (req: ReturnType<typeof createMockReq>, res: ReturnType<typeof createMockRes>) => void) {
+    post(path: string, handler: (req: ReturnType<typeof createMockReq>, res: ReturnType<typeof createMockRes>) => Promise<void> | void) {
       routes[`POST:${path}`] = handler;
     },
     routes,
@@ -86,46 +96,15 @@ describe("Facebook OAuth Routes", () => {
       expect(body.url).toContain("business_management");
     });
 
-    it("includes redirect_uri in the URL", async () => {
+    it("includes redirect_uri derived from configured APP_ORIGIN", async () => {
       const req = createMockReq();
       const res = createMockRes();
 
       await app.routes["GET:/api/auth/facebook/url"](req, res);
 
-      const body = res.body as { url: string };
-      expect(body.url).toContain("redirect_uri=");
-      expect(body.url).toContain("auth%2Ffacebook%2Fcallback");
-    });
-
-    it("uses custom origin when provided and it is in the allowlist", async () => {
-      const req = createMockReq({ query: { origin: "https://www.paineldisparosapi.online" } });
-      const res = createMockRes();
-
-      await app.routes["GET:/api/auth/facebook/url"](req, res);
-
       const body = res.body as { url: string; redirectUri: string };
-      expect(body.redirectUri).toBe("https://www.paineldisparosapi.online/auth/facebook/callback");
-      expect(body.url).toContain(encodeURIComponent("https://www.paineldisparosapi.online/auth/facebook/callback"));
-    });
-
-    it("falls back to default origin when provided origin is not in allowlist", async () => {
-      const req = createMockReq({ query: { origin: "https://evil.example.com" } });
-      const res = createMockRes();
-
-      await app.routes["GET:/api/auth/facebook/url"](req, res);
-
-      const body = res.body as { url: string; redirectUri: string };
-      expect(body.redirectUri).toContain("whatsappdash-j5kkyxvt.manus.space");
-    });
-
-    it("accepts manus.space subdomain URLs dynamically", async () => {
-      const req = createMockReq({ query: { origin: "https://myapp-abc123.manus.space" } });
-      const res = createMockRes();
-
-      await app.routes["GET:/api/auth/facebook/url"](req, res);
-
-      const body = res.body as { url: string; redirectUri: string };
-      expect(body.redirectUri).toBe("https://myapp-abc123.manus.space/auth/facebook/callback");
+      expect(body.redirectUri).toBe("https://painelapi.online/auth/facebook/callback");
+      expect(body.url).toContain(encodeURIComponent("https://painelapi.online/auth/facebook/callback"));
     });
   });
 
@@ -157,16 +136,13 @@ describe("Facebook OAuth Routes", () => {
     });
 
     it("returns 400 when no WhatsApp Business accounts found", async () => {
-      // Mock token exchange success
       mockFetch
         .mockResolvedValueOnce({
           json: async () => ({ access_token: "short_token_abc" }),
         })
-        // Mock long-lived token exchange
         .mockResolvedValueOnce({
           json: async () => ({ access_token: "long_token_xyz" }),
         })
-        // Mock WABA list — empty
         .mockResolvedValueOnce({
           json: async () => ({ data: [] }),
         });
@@ -182,22 +158,18 @@ describe("Facebook OAuth Routes", () => {
     });
 
     it("returns wabas with phone numbers on success", async () => {
-      // Mock token exchange
       mockFetch
         .mockResolvedValueOnce({
           json: async () => ({ access_token: "short_token" }),
         })
-        // Mock long-lived token
         .mockResolvedValueOnce({
           json: async () => ({ access_token: "long_token_abc123" }),
         })
-        // Mock WABA list
         .mockResolvedValueOnce({
           json: async () => ({
             data: [{ id: "waba_001", name: "Minha Empresa" }],
           }),
         })
-        // Mock phone numbers for WABA
         .mockResolvedValueOnce({
           json: async () => ({
             data: [

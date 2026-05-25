@@ -15,6 +15,7 @@ import Privacy from "./pages/Privacy";
 import Inbox from "./pages/Inbox";
 import Automations from "./pages/Automations";
 import Admin from "./pages/Admin";
+import AdminSettings from "./pages/AdminSettings";
 import { useAuth } from "./_core/hooks/useAuth";
 import DashboardLayout from "./components/DashboardLayout";
 
@@ -40,6 +41,7 @@ function Router() {
       <Route path="/inbox" component={() => <ProtectedRoute component={Inbox} />} />
       <Route path="/automations" component={() => <ProtectedRoute component={Automations} />} />
       <Route path="/admin" component={() => <ProtectedRoute component={Admin} />} />
+      <Route path="/admin/settings" component={() => <ProtectedRoute component={AdminSettings} />} />
       <Route path="/auth/facebook/callback" component={FacebookCallback} />
       <Route path="/privacy" component={Privacy} />
       <Route path="/404" component={NotFound} />

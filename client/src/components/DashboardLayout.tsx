@@ -43,6 +43,7 @@ const menuItems = [
 
 const adminMenuItems = [
   { icon: Shield, label: "Admin", path: "/admin" },
+  { icon: Settings, label: "Configurações", path: "/admin/settings" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";

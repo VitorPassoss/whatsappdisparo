@@ -126,8 +126,12 @@ async function startServer() {
 
   // ─── WhatsApp Webhook ──────────────────────────────────────────────────────
   // GET: Meta verifica o webhook com hub.challenge
-  app.get("/api/webhook/whatsapp", (req, res) => {
-    const VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_TOKEN || "wa_disparo_webhook_token";
+  app.get("/api/webhook/whatsapp", async (req, res) => {
+    const { getSetting } = await import("../settings");
+    const VERIFY_TOKEN =
+      (await getSetting("WHATSAPP_WEBHOOK_TOKEN")) ||
+      process.env.WHATSAPP_WEBHOOK_TOKEN ||
+      "wa_disparo_webhook_token";
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];

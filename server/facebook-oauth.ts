@@ -1,5 +1,5 @@
 import type { Express, Request, Response } from "express";
-import { ENV } from "./_core/env";
+import { getSetting } from "./settings";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -16,16 +16,31 @@ type Waba = {
   phone_numbers?: PhoneNumber[];
 };
 
+// ─── Credentials ──────────────────────────────────────────────────────────────
+
+/**
+ * Retorna as credenciais do Facebook App lendo do banco (settings) com
+ * fallback pra process.env. Mantém compat enquanto o Vitor migra do .env
+ * pro painel admin.
+ */
+async function getFacebookCreds(): Promise<{ appId: string; appSecret: string }> {
+  const [appId, appSecret] = await Promise.all([
+    getSetting("FACEBOOK_APP_ID"),
+    getSetting("FACEBOOK_APP_SECRET"),
+  ]);
+  return { appId: appId ?? "", appSecret: appSecret ?? "" };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-async function exchangeCodeForToken(code: string, origin: string): Promise<{
+async function exchangeCodeForToken(code: string, redirectUri: string): Promise<{
   access_token?: string;
   error?: { message: string };
 }> {
-  const redirectUri = `${origin}/auth/facebook/callback`;
+  const { appId, appSecret } = await getFacebookCreds();
   const params = new URLSearchParams({
-    client_id: ENV.facebookAppId,
-    client_secret: ENV.facebookAppSecret,
+    client_id: appId,
+    client_secret: appSecret,
     redirect_uri: redirectUri,
     code,
   });
@@ -40,10 +55,11 @@ async function getLongLivedToken(shortToken: string): Promise<{
   access_token?: string;
   error?: { message: string };
 }> {
+  const { appId, appSecret } = await getFacebookCreds();
   const params = new URLSearchParams({
     grant_type: "fb_exchange_token",
-    client_id: ENV.facebookAppId,
-    client_secret: ENV.facebookAppSecret,
+    client_id: appId,
+    client_secret: appSecret,
     fb_exchange_token: shortToken,
   });
 
@@ -75,33 +91,38 @@ async function getPhoneNumbers(wabaId: string, accessToken: string): Promise<{
 
 // ─── Route registration ───────────────────────────────────────────────────────
 
-// Allowed origins for Facebook OAuth redirect_uri
-const ALLOWED_ORIGINS = [
-  "https://whatsappdash-j5kkyxvt.manus.space",
-  "https://www.paineldisparosapi.online",
-  "https://paineldisparosapi.online",
-  "http://localhost:3000",
-];
+/**
+ * Resolve o origin público do app. Prioriza:
+ *  1. setting APP_ORIGIN configurado via UI admin
+ *  2. origin enviado pelo client (sanitizado contra a setting)
+ *  3. construído a partir do header Host da request
+ */
+async function resolveOrigin(req: Request, clientOrigin?: string): Promise<string> {
+  const configured = (await getSetting("APP_ORIGIN")) ?? "";
+  if (configured) {
+    // Quando admin definiu APP_ORIGIN, ele manda — só aceita clientOrigin
+    // se bater (defesa contra open-redirect).
+    if (clientOrigin && clientOrigin === configured) return configured;
+    return configured;
+  }
 
-function sanitizeOrigin(origin: string | undefined): string {
-  const defaultOrigin = "https://whatsappdash-j5kkyxvt.manus.space";
-  if (!origin) return defaultOrigin;
-  // Allow any *.manus.space or *.manus.computer subdomain (dev/preview URLs)
-  const isManusUrl = /^https:\/\/[a-z0-9-]+\.(manus\.space|manus\.computer)$/.test(origin);
-  if (ALLOWED_ORIGINS.includes(origin) || isManusUrl) return origin;
-  return defaultOrigin;
+  // Sem APP_ORIGIN configurado: deriva do Host atual.
+  const host = req.get("host");
+  const proto = req.get("x-forwarded-proto") ?? req.protocol ?? "https";
+  if (host) return `${proto}://${host}`;
+  return clientOrigin ?? "http://localhost:3000";
 }
 
 export function registerFacebookOAuthRoutes(app: Express) {
   // 1. Generate Facebook OAuth URL
-  app.get("/api/auth/facebook/url", (req: Request, res: Response) => {
-    if (!ENV.facebookAppId) {
-      res.status(500).json({ error: "Facebook App ID não configurado" });
+  app.get("/api/auth/facebook/url", async (req: Request, res: Response) => {
+    const { appId } = await getFacebookCreds();
+    if (!appId) {
+      res.status(500).json({ error: "Facebook App ID não configurado. Acesse /admin/settings." });
       return;
     }
 
-    // Use origin from query param (sent by frontend) so it works with any domain
-    const origin = sanitizeOrigin(req.query.origin as string);
+    const origin = await resolveOrigin(req, req.query.origin as string | undefined);
     const redirectUri = `${origin}/auth/facebook/callback`;
     const scope = [
       "whatsapp_business_management",
@@ -110,7 +131,7 @@ export function registerFacebookOAuthRoutes(app: Express) {
     ].join(",");
 
     const params = new URLSearchParams({
-      client_id: ENV.facebookAppId,
+      client_id: appId,
       redirect_uri: redirectUri,
       scope,
       response_type: "code",
@@ -123,18 +144,25 @@ export function registerFacebookOAuthRoutes(app: Express) {
 
   // 2. Exchange code for token and list WABAs + phone numbers
   app.post("/api/auth/facebook/exchange", async (req: Request, res: Response) => {
-    const { code } = req.body as { code?: string };
+    const { code, origin: clientOrigin } = req.body as { code?: string; origin?: string };
 
     if (!code) {
       res.status(400).json({ error: "Código de autorização ausente" });
       return;
     }
 
-    const origin = sanitizeOrigin((req.body as { code?: string; origin?: string }).origin);
+    const { appId, appSecret } = await getFacebookCreds();
+    if (!appId || !appSecret) {
+      res.status(500).json({ error: "Credenciais do Facebook não configuradas. Acesse /admin/settings." });
+      return;
+    }
+
+    const origin = await resolveOrigin(req, clientOrigin);
+    const redirectUri = `${origin}/auth/facebook/callback`;
 
     try {
       // Exchange code for short-lived token
-      const tokenData = await exchangeCodeForToken(code, origin);
+      const tokenData = await exchangeCodeForToken(code, redirectUri);
       if (!tokenData.access_token) {
         res.status(400).json({ error: tokenData.error?.message ?? "Falha ao trocar código por token" });
         return;
