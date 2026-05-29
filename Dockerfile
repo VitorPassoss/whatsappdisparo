@@ -52,4 +52,7 @@ EXPOSE 3000
 
 # tini evita zombie processes e propaga SIGTERM corretamente
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/index.js"]
+# Aplica migrations pendentes ANTES de subir o server. Idempotente: num banco
+# já migrado vira no-op. Sem isso, um banco novo (ex: troca de instância MySQL)
+# sobe sem a tabela `users` e o cadastro quebra com INTERNAL_SERVER_ERROR.
+CMD ["sh", "-c", "pnpm exec drizzle-kit migrate && node dist/index.js"]
