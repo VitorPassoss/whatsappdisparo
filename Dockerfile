@@ -14,7 +14,7 @@ RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
 
-RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+RUN --mount=type=cache,id=s/f8013c45-2836-4c11-ad08-b482d666c78c-/root/.local/share/pnpm/store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
 # Copia o resto do código e builda
@@ -40,7 +40,7 @@ COPY patches ./patches
 COPY drizzle ./drizzle
 
 # Reinstala só prod deps no runner — imagem fica menor
-RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
+RUN --mount=type=cache,id=s/f8013c45-2836-4c11-ad08-b482d666c78c-/root/.local/share/pnpm/store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --prod \
  && pnpm add --save-dev drizzle-kit@^0.31.4 tsx@^4.19.1 \
  && pnpm store prune
