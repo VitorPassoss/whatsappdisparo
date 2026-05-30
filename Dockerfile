@@ -55,4 +55,6 @@ ENTRYPOINT ["/sbin/tini", "--"]
 # Aplica migrations pendentes ANTES de subir o server. Idempotente: num banco
 # já migrado vira no-op. Sem isso, um banco novo (ex: troca de instância MySQL)
 # sobe sem a tabela `users` e o cadastro quebra com INTERNAL_SERVER_ERROR.
-CMD ["sh", "-c", "pnpm exec drizzle-kit migrate && node dist/index.js"]
+# `|| true` evita crash-loop: se o banco ainda não está pronto/configurado, o
+# server sobe assim mesmo e a migration roda no próximo deploy.
+CMD ["sh", "-c", "pnpm exec drizzle-kit migrate || echo '[migrate] falhou/pulado — subindo server mesmo assim'; node dist/index.js"]

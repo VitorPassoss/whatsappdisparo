@@ -21,9 +21,9 @@ let _db: ReturnType<typeof drizzle> | null = null;
 let _rawPool: mysql.Pool | null = null;
 
 export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
+  if (!_db && ENV.databaseUrl) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      _db = drizzle(ENV.databaseUrl);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
@@ -38,10 +38,10 @@ export async function getDb() {
  * `drizzle-kit migrate` rodar primeiro.
  */
 export async function getRawConnection(): Promise<mysql.Pool | null> {
-  if (!_rawPool && process.env.DATABASE_URL) {
+  if (!_rawPool && ENV.databaseUrl) {
     try {
       _rawPool = mysql.createPool({
-        uri: process.env.DATABASE_URL,
+        uri: ENV.databaseUrl,
         connectionLimit: 5,
       });
     } catch (error) {
