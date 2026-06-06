@@ -12,7 +12,7 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { Send, Zap, Users, CheckCircle2,
   XCircle, Clock, Terminal, RefreshCw, Plus, AlertTriangle,
-  CalendarClock, Calendar
+  CalendarClock, Calendar, Loader2, AlertCircle
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { format } from "date-fns";
@@ -20,9 +20,15 @@ import { format } from "date-fns";
 export default function Dispatch() {
   const [accessToken, setAccessToken] = useState("");
   const [phoneNumberId, setPhoneNumberId] = useState("");
+  const [wabaId, setWabaId] = useState("");
   const [templateName, setTemplateName] = useState("");
   const [templateHasHeaderImage, setTemplateHasHeaderImage] = useState(false);
   const [templateHeaderImageUrl, setTemplateHeaderImageUrl] = useState("");
+  // Credenciais "commitadas" pra busca de templates: só dispara a chamada à
+  // Graph API quando o usuário clica em "Carregar templates" (não a cada tecla).
+  const [tplReq, setTplReq] = useState<
+    { accessToken: string; phoneNumberId: string; wabaId?: string } | null
+  >(null);
   const [rawPhones, setRawPhones] = useState("");
   const [listId, setListId] = useState<string>("");
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
@@ -32,6 +38,34 @@ export default function Dispatch() {
   const consoleRef = useRef<HTMLDivElement>(null);
 
   const { data: contactLists } = trpc.contactLists.list.useQuery();
+
+  const {
+    data: templates,
+    isFetching: loadingTemplates,
+    error: templatesError,
+  } = trpc.templates.listManual.useQuery(
+    tplReq ?? { accessToken: "", phoneNumberId: "" },
+    { enabled: !!tplReq, retry: false }
+  );
+
+  const credsReady = !!accessToken.trim() && !!phoneNumberId.trim();
+  const needsWabaId = !!templatesError && templatesError.message.includes("WABA ID");
+
+  const loadTemplates = () =>
+    setTplReq({
+      accessToken: accessToken.trim(),
+      phoneNumberId: phoneNumberId.trim(),
+      wabaId: wabaId.trim() || undefined,
+    });
+
+  // Ao escolher um template, guarda o nome e detecta automaticamente se ele
+  // tem imagem no header (componente HEADER com format IMAGE).
+  const onSelectTemplate = (name: string) => {
+    setTemplateName(name);
+    const tpl = templates?.find((t) => t.name === name);
+    const header = tpl?.components.find((c) => c.type === "HEADER");
+    setTemplateHasHeaderImage(header?.format === "IMAGE");
+  };
 
   const { data: activeCampaign } = trpc.campaigns.get.useQuery(
     { id: activeCampaignId! },
@@ -200,14 +234,84 @@ export default function Dispatch() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Template Name</Label>
-                  <Input
-                    placeholder="protocolo_1"
-                    value={templateName}
-                    onChange={e => setTemplateName(e.target.value)}
-                    disabled={isSending}
-                    className="bg-input border-border font-mono"
-                  />
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs text-muted-foreground">Template</Label>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={isSending || !credsReady || loadingTemplates}
+                      onClick={loadTemplates}
+                      className="h-7 gap-1 text-xs"
+                    >
+                      {loadingTemplates ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3 h-3" />
+                      )}
+                      {templates ? "Recarregar" : "Carregar templates"}
+                    </Button>
+                  </div>
+
+                  {!tplReq ? (
+                    <p className="text-xs text-muted-foreground p-2 bg-secondary/30 rounded-lg">
+                      Preencha o Access Token e o Phone Number ID e clique em "Carregar templates".
+                    </p>
+                  ) : loadingTemplates ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground p-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Carregando templates...
+                    </div>
+                  ) : needsWabaId ? (
+                    <div className="space-y-2 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                      <div className="flex items-center gap-2 text-xs text-yellow-400">
+                        <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                        Não consegui detectar o WABA ID automaticamente com esse token. Informe ele abaixo:
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          placeholder="WABA ID (ID da conta WhatsApp Business)"
+                          value={wabaId}
+                          onChange={e => setWabaId(e.target.value)}
+                          disabled={isSending}
+                          className="bg-input border-border font-mono text-xs"
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={!wabaId.trim()}
+                          onClick={loadTemplates}
+                          className="h-9 shrink-0 text-xs"
+                        >
+                          Buscar
+                        </Button>
+                      </div>
+                    </div>
+                  ) : templatesError ? (
+                    <p className="text-xs text-red-400 p-2 bg-red-500/10 rounded-lg border border-red-500/20">
+                      {templatesError.message}
+                    </p>
+                  ) : !templates?.length ? (
+                    <p className="text-xs text-muted-foreground p-2 bg-secondary/30 rounded-lg">
+                      Nenhum template aprovado encontrado nessa conta.
+                    </p>
+                  ) : (
+                    <Select value={templateName} onValueChange={onSelectTemplate} disabled={isSending}>
+                      <SelectTrigger className="bg-input border-border">
+                        <SelectValue placeholder="Selecionar template..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {templates.map(t => (
+                          <SelectItem key={t.id} value={t.name}>
+                            <div className="flex flex-col">
+                              <span className="font-medium">{t.name}</span>
+                              <span className="text-xs text-muted-foreground">{t.language} · {t.category}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
                 </div>
 
                 {/* Template tem imagem no Header */}

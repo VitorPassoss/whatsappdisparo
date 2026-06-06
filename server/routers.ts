@@ -94,6 +94,37 @@ async function fetchWhatsAppTemplates(
   }
 }
 
+// Descobre o WABA ID (conta WhatsApp Business) a partir do Phone Number ID,
+// usando só o Access Token. Os templates vivem dentro de uma WABA, então
+// precisamos dela pra listar. Enumera as WABAs do token e casa o phone number;
+// se houver só uma WABA, usa ela. Retorna null se não der pra detectar
+// (ex.: token de system user sem acesso a /me) — aí o usuário informa à mão.
+async function resolveWabaIdFromPhoneNumber(
+  accessToken: string,
+  phoneNumberId: string
+): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/me/whatsapp_business_accounts?fields=id&limit=100&access_token=${accessToken}`
+    );
+    const json = (await res.json()) as { data?: { id: string }[] };
+    const wabas = json.data ?? [];
+    for (const waba of wabas) {
+      const pres = await fetch(
+        `https://graph.facebook.com/v19.0/${waba.id}/phone_numbers?fields=id&limit=100&access_token=${accessToken}`
+      );
+      const pjson = (await pres.json()) as { data?: { id: string }[] };
+      if ((pjson.data ?? []).some((n) => String(n.id) === String(phoneNumberId))) {
+        return String(waba.id);
+      }
+    }
+    if (wabas.length === 1) return String(wabas[0].id);
+  } catch {
+    // ignora — cai no retorno null e o front pede o WABA ID manual
+  }
+  return null;
+}
+
 function parsePhones(raw: string): string[] {
   return raw
     .split(/[\n,;]+/)
@@ -470,6 +501,37 @@ const templatesRouter = router({
       }
 
       const result = await fetchWhatsAppTemplates(session.accessToken, wabaId);
+      if (result.error) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: result.error });
+      }
+      return result.templates;
+    }),
+
+  // Lista templates a partir de credenciais manuais (sem sessão salva).
+  // O WABA ID é detectado pelo Phone Number ID; se não der, o front manda
+  // o wabaId à mão.
+  listManual: protectedProcedure
+    .input(
+      z.object({
+        accessToken: z.string().min(10),
+        phoneNumberId: z.string().min(1),
+        wabaId: z.string().optional(),
+      })
+    )
+    .query(async ({ input }) => {
+      const wabaId =
+        input.wabaId?.trim() ||
+        (await resolveWabaIdFromPhoneNumber(input.accessToken, input.phoneNumberId));
+
+      if (!wabaId) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            "Não foi possível detectar o WABA ID automaticamente com esse token. Informe o WABA ID manualmente.",
+        });
+      }
+
+      const result = await fetchWhatsAppTemplates(input.accessToken, wabaId);
       if (result.error) {
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: result.error });
       }
