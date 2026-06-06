@@ -157,6 +157,15 @@ export async function updateSessionWabaId(id: number, userId: number, wabaId: st
     .where(and(eq(whatsappSessions.id, id), eq(whatsappSessions.userId, userId)));
 }
 
+export async function updateSessionAccessToken(id: number, userId: number, accessToken: string) {
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db
+    .update(whatsappSessions)
+    .set({ accessToken })
+    .where(and(eq(whatsappSessions.id, id), eq(whatsappSessions.userId, userId)));
+}
+
 // ─── Contact Lists ────────────────────────────────────────────────────────────
 
 export async function createContactList(data: InsertContactList) {

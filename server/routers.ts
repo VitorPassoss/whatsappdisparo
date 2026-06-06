@@ -39,6 +39,7 @@ import {
   updateCampaignStatus,
   updateContactListName,
   updateContactStatus,
+  updateSessionAccessToken,
   updateSessionWabaId,
   updateUserPasswordHash,
   upsertUser,
@@ -245,7 +246,11 @@ const campaignsRouter = router({
   send: protectedProcedure
     .input(
       z.object({
-        sessionId: z.number(),
+        // sessionId continua suportado (compat), mas o disparo pode vir com
+        // credenciais manuais (Access Token + Phone Number ID) direto do form.
+        sessionId: z.number().optional(),
+        accessToken: z.string().min(10).optional(),
+        phoneNumberId: z.string().min(1).optional(),
         name: z.string().min(1).max(128),
         // Sem cap de tamanho funcional: mensagens longas são segmentadas
         // em blocos pelo backend (`chunkMessage`). O `.max` aqui é só
@@ -266,8 +271,34 @@ const campaignsRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      // Get session
-      const session = await getSessionById(input.sessionId, ctx.user.id);
+      // Resolve a sessão. Credenciais manuais (Access Token + Phone Number ID)
+      // têm prioridade: reaproveitamos uma sessão existente com o mesmo
+      // phoneNumberId (atualizando o token) ou criamos uma nova por baixo dos
+      // panos, pra campanha/créditos continuarem amarrados a uma sessão.
+      let session;
+      if (input.accessToken && input.phoneNumberId) {
+        const phoneNumberId = input.phoneNumberId;
+        const accessToken = input.accessToken;
+        const existing = (await getSessionsByUserId(ctx.user.id)).find(
+          (s) => s.phoneNumberId === phoneNumberId
+        );
+        if (existing) {
+          if (existing.accessToken !== accessToken) {
+            await updateSessionAccessToken(existing.id, ctx.user.id, accessToken);
+          }
+          session = { ...existing, accessToken };
+        } else {
+          const created = await createSession({
+            userId: ctx.user.id,
+            name: `Campanha ${phoneNumberId}`,
+            accessToken,
+            phoneNumberId,
+          });
+          session = await getSessionById((created as { insertId: number }).insertId, ctx.user.id);
+        }
+      } else if (input.sessionId) {
+        session = await getSessionById(input.sessionId, ctx.user.id);
+      }
       if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Sessão não encontrada" });
 
       // Parse phones
@@ -300,7 +331,7 @@ const campaignsRouter = router({
       // Create campaign
       const campaignResult = await createCampaign({
         userId: ctx.user.id,
-        sessionId: input.sessionId,
+        sessionId: session.id,
         name: input.name,
         message: input.message,
         totalContacts: phones.length,

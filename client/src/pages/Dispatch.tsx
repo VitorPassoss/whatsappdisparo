@@ -10,13 +10,11 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
-import { Send, Zap, Users, MessageSquare, CheckCircle2,
-  XCircle, Clock, Terminal, RefreshCw, AlertCircle, Plus, AlertTriangle,
-  FileText, ChevronDown, Loader2, CalendarClock, Calendar
+import { Send, Zap, Users, CheckCircle2,
+  XCircle, Clock, Terminal, RefreshCw, Plus, AlertTriangle,
+  CalendarClock, Calendar, Trash2
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useLocation } from "wouter";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 
@@ -75,8 +73,8 @@ function previewChunks(text: string, max = WHATSAPP_TEXT_MAX): string[] {
 }
 
 export default function Dispatch() {
-  const [, navigate] = useLocation();
-  const [sessionId, setSessionId] = useState<string>("");
+  const [accessToken, setAccessToken] = useState("");
+  const [phoneNumberId, setPhoneNumberId] = useState("");
   const [campaignName, setCampaignName] = useState("");
   const [message, setMessage] = useState("");
   const [rawPhones, setRawPhones] = useState("");
@@ -87,31 +85,17 @@ export default function Dispatch() {
   const [delayMax, setDelayMax] = useState(8);
   const consoleRef = useRef<HTMLDivElement>(null);
 
-  // Template state
-  const [messageMode, setMessageMode] = useState<"free" | "template">("free");
-  const [selectedTemplate, setSelectedTemplate] = useState<string>("");
+  // Template state — nome do template digitado à mão (sem dropdown de
+  // templates aprovados). As variáveis e a imagem do header são informadas
+  // manualmente porque não há metadados do template aqui.
+  const [useTemplate, setUseTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [templateLanguage, setTemplateLanguage] = useState("pt_BR");
   const [templateVariables, setTemplateVariables] = useState<string[]>([]);
+  const [templateHasHeaderImage, setTemplateHasHeaderImage] = useState(false);
   const [templateHeaderImageUrl, setTemplateHeaderImageUrl] = useState("");
 
-  const { data: sessions } = trpc.sessions.list.useQuery();
   const { data: contactLists } = trpc.contactLists.list.useQuery();
-
-  const { data: templates, isLoading: loadingTemplates, error: templatesError } = trpc.templates.list.useQuery(
-    { sessionId: parseInt(sessionId) },
-    { enabled: !!sessionId && messageMode === "template", retry: false }
-  );
-
-  const activeTemplate = templates?.find(t => t.name === selectedTemplate);
-  const bodyComponent = activeTemplate?.components.find(c => c.type === "BODY");
-  const headerComponent = activeTemplate?.components.find(c => c.type === "HEADER");
-  const hasHeaderImage = headerComponent?.format === "IMAGE";
-  const bodyText = bodyComponent?.text ?? "";
-  const variableCount = (bodyText.match(/\{\{\d+\}\}/g) ?? []).length;
-
-  // Sync variable slots when template changes
-  useEffect(() => {
-    setTemplateVariables(Array(variableCount).fill(""));
-  }, [variableCount, selectedTemplate]);
 
   const { data: activeCampaign, refetch: refetchCampaign } = trpc.campaigns.get.useQuery(
     { id: activeCampaignId! },
@@ -163,10 +147,11 @@ export default function Dispatch() {
   const [scheduledTime, setScheduledTime] = useState("");
 
   const handleSend = () => {
-    if (!sessionId) return toast.error("Selecione uma sessão WhatsApp");
+    if (!accessToken.trim()) return toast.error("Informe o Access Token");
+    if (!phoneNumberId.trim()) return toast.error("Informe o Phone Number ID");
     if (!campaignName.trim()) return toast.error("Informe o nome da campanha");
-    if (messageMode === "free" && !message.trim()) return toast.error("Informe a mensagem");
-    if (messageMode === "template" && !selectedTemplate) return toast.error("Selecione um template");
+    if (useTemplate && !templateName.trim()) return toast.error("Informe o nome do template");
+    if (!useTemplate && !message.trim()) return toast.error("Informe a mensagem");
     if (!rawPhones.trim() && !listId) return toast.error("Adicione números ou selecione uma lista");
     if (scheduleEnabled) {
       if (!scheduledDate) return toast.error("Informe a data do agendamento");
@@ -183,20 +168,21 @@ export default function Dispatch() {
       ? new Date(`${scheduledDate}T${scheduledTime}`)
       : undefined;
     sendMutation.mutate({
-      sessionId: parseInt(sessionId),
+      accessToken: accessToken.trim(),
+      phoneNumberId: phoneNumberId.trim(),
       name: campaignName,
-      message: messageMode === "template"
-        ? (selectedTemplate ? `[Template: ${selectedTemplate}]` : "template")
+      message: useTemplate
+        ? (templateName ? `[Template: ${templateName}]` : "template")
         : message,
       rawPhones: rawPhones || undefined,
       listId: listId ? parseInt(listId) : undefined,
       delayMin,
       delayMax,
-      useTemplate: messageMode === "template",
-      templateName: messageMode === "template" ? selectedTemplate : undefined,
-      templateLanguage: messageMode === "template" ? (activeTemplate?.language ?? "pt_BR") : undefined,
-      templateVariables: messageMode === "template" ? templateVariables : undefined,
-      templateHeaderImageUrl: messageMode === "template" && hasHeaderImage ? templateHeaderImageUrl : undefined,
+      useTemplate,
+      templateName: useTemplate ? templateName.trim() : undefined,
+      templateLanguage: useTemplate ? (templateLanguage.trim() || "pt_BR") : undefined,
+      templateVariables: useTemplate ? templateVariables : undefined,
+      templateHeaderImageUrl: useTemplate && templateHasHeaderImage ? templateHeaderImageUrl : undefined,
       scheduledAt,
     });
   };
@@ -259,31 +245,27 @@ export default function Dispatch() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Sessão WhatsApp</Label>
-                  {sessions && sessions.length === 0 ? (
-                    <div className="flex items-center gap-2 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-                      <AlertCircle className="w-4 h-4 text-yellow-400 shrink-0" />
-                      <p className="text-xs text-yellow-400">
-                        Nenhuma sessão configurada.{" "}
-                        <button onClick={() => navigate("/sessions")} className="underline font-medium">
-                          Criar sessão
-                        </button>
-                      </p>
-                    </div>
-                  ) : (
-                    <Select value={sessionId} onValueChange={setSessionId} disabled={isSending}>
-                      <SelectTrigger className="bg-input border-border">
-                        <SelectValue placeholder="Selecionar sessão..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {sessions?.map(s => (
-                          <SelectItem key={s.id} value={String(s.id)}>
-                            {s.name} — {s.phoneNumberId}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
+                  <Label className="text-xs text-muted-foreground">Access Token</Label>
+                  <Input
+                    type="password"
+                    placeholder="EAAG..."
+                    value={accessToken}
+                    onChange={e => setAccessToken(e.target.value)}
+                    disabled={isSending}
+                    autoComplete="off"
+                    className="bg-input border-border font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Phone Number ID</Label>
+                  <Input
+                    placeholder="1165210196678047"
+                    value={phoneNumberId}
+                    onChange={e => setPhoneNumberId(e.target.value)}
+                    disabled={isSending}
+                    className="bg-input border-border font-mono"
+                  />
                 </div>
 
                 <div className="space-y-1.5">
@@ -297,148 +279,144 @@ export default function Dispatch() {
                   />
                 </div>
 
-                {/* Message mode toggle */}
-                <div className="space-y-3">
-                  <Label className="text-xs text-muted-foreground">Tipo de Mensagem</Label>
-                  <Tabs value={messageMode} onValueChange={(v) => setMessageMode(v as "free" | "template")}>
-                    <TabsList className="w-full bg-secondary/50">
-                      <TabsTrigger value="free" className="flex-1 gap-1.5 text-xs">
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        Mensagem Livre
-                      </TabsTrigger>
-                      <TabsTrigger value="template" className="flex-1 gap-1.5 text-xs">
-                        <FileText className="w-3.5 h-3.5" />
-                        Template Aprovado
-                      </TabsTrigger>
-                    </TabsList>
-                  </Tabs>
-
-                  {messageMode === "free" ? (
-                    <div className="space-y-1.5">
-                      <Textarea
-                        placeholder={
-                          "Digite a copy completa da mensagem. Sem limite de tamanho.\n\n" +
-                          "Dica: use uma linha contendo só --- para forçar a quebra entre blocos\n" +
-                          "que serão enviados em sequência (ex: bloco 1, separador, bloco 2)."
-                        }
-                        value={message}
-                        onChange={e => setMessage(e.target.value)}
-                        disabled={isSending}
-                        rows={8}
-                        className="bg-input border-border resize-y min-h-[160px] font-mono text-sm"
-                      />
-                      <div className="flex items-center justify-between text-xs text-muted-foreground">
-                        <span>
-                          Mensagens longas são divididas em <strong className="text-foreground">{blockCount || 0} bloco{blockCount === 1 ? "" : "s"}</strong> e entregues em ordem.
-                        </span>
-                        <span className="font-mono">{message.length.toLocaleString("pt-BR")} caracteres</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {!sessionId ? (
-                        <p className="text-xs text-yellow-400 p-2 bg-yellow-500/10 rounded-lg border border-yellow-500/20">
-                          Selecione uma sessão para carregar os templates
-                        </p>
-                      ) : loadingTemplates ? (
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground p-3">
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          Carregando templates...
-                        </div>
-                      ) : templatesError ? (
-                        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 space-y-1.5">
-                          <div className="flex items-center gap-2 text-xs font-medium text-red-400">
-                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
-                            Erro ao carregar templates
-                          </div>
-                          <p className="text-xs text-red-300/80">{templatesError.message}</p>
-                          {templatesError.message?.includes("WABA ID") && (
-                            <p className="text-xs text-muted-foreground mt-1">
-                              Acesse <strong>Sessões WhatsApp</strong> e edite o WABA ID da sessão, ou reconecte pelo botão "Entrar com Facebook".
-                            </p>
-                          )}
-                        </div>
-                      ) : !templates?.length ? (
-                        <p className="text-xs text-muted-foreground p-3 bg-secondary/30 rounded-lg">
-                          Nenhum template aprovado encontrado nessa sessão.
-                        </p>
-                      ) : (
-                        <>
-                          <Select value={selectedTemplate} onValueChange={setSelectedTemplate} disabled={isSending}>
-                            <SelectTrigger className="bg-input border-border">
-                              <SelectValue placeholder="Selecionar template..." />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {templates.map(t => (
-                                <SelectItem key={t.id} value={t.name}>
-                                  <div className="flex flex-col">
-                                    <span className="font-medium">{t.name}</span>
-                                    <span className="text-xs text-muted-foreground">{t.language} · {t.category}</span>
-                                  </div>
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-
-                          {activeTemplate && (
-                            <div className="space-y-3">
-                              {/* Template preview */}
-                              <div className="p-3 rounded-lg bg-[#075E54]/10 border border-[#075E54]/30">
-                                <p className="text-xs text-muted-foreground mb-1.5 font-medium">Preview do Template</p>
-                                <div className="bg-[#1a1a1a] rounded-lg p-3 text-sm text-foreground font-mono whitespace-pre-wrap">
-                                  {bodyText
-                                    ? bodyText.replace(/\{\{(\d+)\}\}/g, (_, i) =>
-                                        templateVariables[parseInt(i) - 1]
-                                          ? `[${templateVariables[parseInt(i) - 1]}]`
-                                          : `{{${i}}}`
-                                      )
-                                    : "(sem corpo de texto)"}
-                                </div>
-                              </div>
-
-                              {/* Header image URL if needed */}
-                              {hasHeaderImage && (
-                                <div className="space-y-1.5">
-                                  <Label className="text-xs text-muted-foreground">URL da Imagem do Header</Label>
-                                  <Input
-                                    placeholder="https://exemplo.com/imagem.jpg"
-                                    value={templateHeaderImageUrl}
-                                    onChange={e => setTemplateHeaderImageUrl(e.target.value)}
-                                    disabled={isSending}
-                                    className="bg-input border-border text-xs"
-                                  />
-                                </div>
-                              )}
-
-                              {/* Variable inputs */}
-                              {variableCount > 0 && (
-                                <div className="space-y-2">
-                                  <Label className="text-xs text-muted-foreground">Variáveis do Template</Label>
-                                  {Array.from({ length: variableCount }, (_, i) => (
-                                    <div key={i} className="flex items-center gap-2">
-                                      <span className="text-xs text-primary font-mono w-8 shrink-0">{`{{${i + 1}}}`}</span>
-                                      <Input
-                                        placeholder={`Valor para {{${i + 1}}}`}
-                                        value={templateVariables[i] ?? ""}
-                                        onChange={e => {
-                                          const updated = [...templateVariables];
-                                          updated[i] = e.target.value;
-                                          setTemplateVariables(updated);
-                                        }}
-                                        disabled={isSending}
-                                        className="bg-input border-border text-xs"
-                                      />
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  )}
+                {/* Toggle de template (substitui as abas) */}
+                <div className="flex items-center justify-between rounded-lg border border-border bg-secondary/20 p-3">
+                  <span className="text-sm font-medium text-foreground">Usar Template Aprovado</span>
+                  <button
+                    type="button"
+                    onClick={() => setUseTemplate(v => !v)}
+                    disabled={isSending}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
+                      useTemplate ? "bg-primary" : "bg-muted"
+                    }`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                      useTemplate ? "translate-x-4" : "translate-x-1"
+                    }`} />
+                  </button>
                 </div>
+
+                {!useTemplate ? (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Mensagem</Label>
+                    <Textarea
+                      placeholder={
+                        "Digite a copy completa da mensagem. Sem limite de tamanho.\n\n" +
+                        "Dica: use uma linha contendo só --- para forçar a quebra entre blocos\n" +
+                        "que serão enviados em sequência (ex: bloco 1, separador, bloco 2)."
+                      }
+                      value={message}
+                      onChange={e => setMessage(e.target.value)}
+                      disabled={isSending}
+                      rows={8}
+                      className="bg-input border-border resize-y min-h-[160px] font-mono text-sm"
+                    />
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>
+                        Mensagens longas são divididas em <strong className="text-foreground">{blockCount || 0} bloco{blockCount === 1 ? "" : "s"}</strong> e entregues em ordem.
+                      </span>
+                      <span className="font-mono">{message.length.toLocaleString("pt-BR")} caracteres</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Template Name</Label>
+                      <Input
+                        placeholder="protocolo_1"
+                        value={templateName}
+                        onChange={e => setTemplateName(e.target.value)}
+                        disabled={isSending}
+                        className="bg-input border-border font-mono"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">Idioma do Template</Label>
+                      <Input
+                        placeholder="pt_BR"
+                        value={templateLanguage}
+                        onChange={e => setTemplateLanguage(e.target.value)}
+                        disabled={isSending}
+                        className="bg-input border-border font-mono"
+                      />
+                    </div>
+
+                    {/* Template tem imagem no Header */}
+                    <div className="flex items-center justify-between rounded-lg border border-border bg-secondary/20 p-3">
+                      <span className="text-sm font-medium text-foreground">Template tem imagem no Header</span>
+                      <button
+                        type="button"
+                        onClick={() => setTemplateHasHeaderImage(v => !v)}
+                        disabled={isSending}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
+                          templateHasHeaderImage ? "bg-primary" : "bg-muted"
+                        }`}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                          templateHasHeaderImage ? "translate-x-4" : "translate-x-1"
+                        }`} />
+                      </button>
+                    </div>
+
+                    {templateHasHeaderImage && (
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">URL da Imagem do Header</Label>
+                        <Input
+                          placeholder="https://exemplo.com/imagem.jpg"
+                          value={templateHeaderImageUrl}
+                          onChange={e => setTemplateHeaderImageUrl(e.target.value)}
+                          disabled={isSending}
+                          className="bg-input border-border text-xs"
+                        />
+                      </div>
+                    )}
+
+                    {/* Variáveis do template (adicionadas manualmente) */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs text-muted-foreground">Variáveis do Template (opcional)</Label>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={isSending}
+                          onClick={() => setTemplateVariables(v => [...v, ""])}
+                          className="h-7 gap-1 text-xs"
+                        >
+                          <Plus className="w-3 h-3" />
+                          Variável
+                        </Button>
+                      </div>
+                      {templateVariables.map((value, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <span className="text-xs text-primary font-mono w-8 shrink-0">{`{{${i + 1}}}`}</span>
+                          <Input
+                            placeholder={`Valor para {{${i + 1}}}`}
+                            value={value}
+                            onChange={e => {
+                              const updated = [...templateVariables];
+                              updated[i] = e.target.value;
+                              setTemplateVariables(updated);
+                            }}
+                            disabled={isSending}
+                            className="bg-input border-border text-xs"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            disabled={isSending}
+                            onClick={() => setTemplateVariables(v => v.filter((_, idx) => idx !== i))}
+                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-red-400"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -546,7 +524,7 @@ export default function Dispatch() {
 
                 <Button
                   onClick={handleSend}
-                  disabled={isSending || sendMutation.isPending || !sessionId}
+                  disabled={isSending || sendMutation.isPending || !accessToken || !phoneNumberId}
                   className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 h-11 font-semibold"
                 >
                   {isSending || sendMutation.isPending ? (
@@ -699,10 +677,15 @@ export default function Dispatch() {
                 <span className="font-medium text-primary">{phoneCount} contatos</span>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Sessão</span>
-                <span className="font-medium text-foreground">{sessions?.find(s => String(s.id) === sessionId)?.name}</span>
+                <span className="text-muted-foreground">Phone Number ID</span>
+                <span className="font-medium text-foreground font-mono">{phoneNumberId}</span>
               </div>
-              {messageMode === "free" && blockCount > 1 && (
+              {useTemplate ? (
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Template</span>
+                  <span className="font-medium text-primary font-mono">{templateName}</span>
+                </div>
+              ) : blockCount > 1 && (
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Blocos por contato</span>
                   <span className="font-medium text-primary">{blockCount}</span>
@@ -711,9 +694,13 @@ export default function Dispatch() {
             </div>
             <div className="p-3 rounded-lg bg-secondary/30 border border-border">
               <p className="text-xs text-muted-foreground mb-1">
-                Mensagem{messageMode === "free" && blockCount > 1 ? ` · ${blockCount} blocos sequenciais` : ""}
+                {useTemplate
+                  ? "Template"
+                  : `Mensagem${blockCount > 1 ? ` · ${blockCount} blocos sequenciais` : ""}`}
               </p>
-              <p className="text-sm text-foreground line-clamp-3">{message}</p>
+              <p className="text-sm text-foreground line-clamp-3">
+                {useTemplate ? templateName : message}
+              </p>
             </div>
             <p className="text-xs text-muted-foreground">
               Ao confirmar, o disparo será iniciado imediatamente para todos os contatos.
