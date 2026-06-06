@@ -57,6 +57,13 @@
       "when": 1776476846036,
       "tag": "0007_neat_speedball",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1776480000000,
+      "tag": "0008_chunky_variables",
+      "breakpoints": true
     }
   ]
 }

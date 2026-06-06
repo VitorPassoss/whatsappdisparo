@@ -17,13 +17,59 @@ import { Send, Zap, Users, CheckCircle2,
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { format } from "date-fns";
 
+// Presets de Business Manager → preenchem Rate (msgs/min) e Concurrency (workers).
+const BM_PRESETS = {
+  "2k": { label: "BM 2k", rate: 500, concurrency: 50, hint: "500 msgs/min, 50 workers" },
+  "10k": { label: "BM 10k", rate: 1000, concurrency: 100, hint: "1.000 msgs/min, 100 workers" },
+  "100k": { label: "BM 100k", rate: 2000, concurrency: 200, hint: "2.000 msgs/min, 200 workers" },
+} as const;
+type BmType = keyof typeof BM_PRESETS;
+
+const LANGUAGES = [
+  { code: "pt_BR", label: "Português (BR)" },
+  { code: "pt_PT", label: "Português (PT)" },
+  { code: "en_US", label: "English (US)" },
+  { code: "en", label: "English" },
+  { code: "es_ES", label: "Español (ES)" },
+  { code: "es_MX", label: "Español (MX)" },
+  { code: "es", label: "Español" },
+];
+
+type CsvContact = { phone: string; variables: string[] };
+
+// Faz o parse do CSV `phone,var1,...,var10`. Pula header opcional e linhas
+// sem telefone válido. Não trata vírgula dentro de campo (CSV simples).
+function parseCsv(text: string): CsvContact[] {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+  const start = lines[0].toLowerCase().startsWith("phone") ? 1 : 0;
+  const out: CsvContact[] = [];
+  for (let i = start; i < lines.length; i++) {
+    const cols = lines[i].split(",").map((c) => c.trim());
+    const phone = (cols[0] ?? "").replace(/\D/g, "");
+    if (phone.length < 8) continue;
+    out.push({ phone, variables: cols.slice(1) });
+  }
+  return out;
+}
+
 export default function Dispatch() {
   const [accessToken, setAccessToken] = useState("");
   const [phoneNumberId, setPhoneNumberId] = useState("");
   const [wabaId, setWabaId] = useState("");
   const [templateName, setTemplateName] = useState("");
+  const [manualTemplate, setManualTemplate] = useState(false);
+  const [templateLanguage, setTemplateLanguage] = useState("pt_BR");
+  const [templateVarCount, setTemplateVarCount] = useState(0);
   const [templateHasHeaderImage, setTemplateHasHeaderImage] = useState(false);
   const [templateHeaderImageUrl, setTemplateHeaderImageUrl] = useState("");
+  // Throughput
+  const [bmType, setBmType] = useState<BmType>("2k");
+  const [rate, setRate] = useState<number>(BM_PRESETS["2k"].rate);
+  const [concurrency, setConcurrency] = useState<number>(BM_PRESETS["2k"].concurrency);
+  // Upload CSV de contatos com variáveis
+  const [csvText, setCsvText] = useState("");
+  const [csvContacts, setCsvContacts] = useState<CsvContact[]>([]);
   // Credenciais "commitadas" pra busca de templates: só dispara a chamada à
   // Graph API quando o usuário clica em "Carregar templates" (não a cada tecla).
   const [tplReq, setTplReq] = useState<
@@ -58,14 +104,36 @@ export default function Dispatch() {
       wabaId: wabaId.trim() || undefined,
     });
 
-  // Ao escolher um template, guarda o nome e detecta automaticamente se ele
-  // tem imagem no header (componente HEADER com format IMAGE).
+  // Ao escolher um template, guarda o nome e detecta automaticamente:
+  // imagem no header, nº de variáveis do corpo ({{n}}) e idioma.
   const onSelectTemplate = (name: string) => {
     setTemplateName(name);
     const tpl = templates?.find((t) => t.name === name);
     const header = tpl?.components.find((c) => c.type === "HEADER");
     setTemplateHasHeaderImage(header?.format === "IMAGE");
+    const body = tpl?.components.find((c) => c.type === "BODY");
+    const count = body?.text ? (body.text.match(/\{\{\d+\}\}/g)?.length ?? 0) : 0;
+    setTemplateVarCount(count);
+    if (tpl?.language) setTemplateLanguage(tpl.language);
   };
+
+  const applyBmPreset = (bm: BmType) => {
+    setBmType(bm);
+    setRate(BM_PRESETS[bm].rate);
+    setConcurrency(BM_PRESETS[bm].concurrency);
+  };
+
+  const handleValidateCsv = () => {
+    const parsed = parseCsv(csvText);
+    if (parsed.length === 0) {
+      setCsvContacts([]);
+      return toast.error("Nenhum contato válido encontrado no CSV");
+    }
+    setCsvContacts(parsed);
+    toast.success(`${parsed.length} contato${parsed.length !== 1 ? "s" : ""} carregado${parsed.length !== 1 ? "s" : ""}`);
+  };
+
+  const csvPreviewCount = parseCsv(csvText).length;
 
   const { data: activeCampaign } = trpc.campaigns.get.useQuery(
     { id: activeCampaignId! },
@@ -119,7 +187,10 @@ export default function Dispatch() {
     if (!accessToken.trim()) return toast.error("Informe o Access Token");
     if (!phoneNumberId.trim()) return toast.error("Informe o Phone Number ID");
     if (!templateName.trim()) return toast.error("Informe o nome do template");
-    if (!rawPhones.trim() && !hasList) return toast.error("Adicione números ou selecione uma lista");
+    if (csvText.trim() && csvContacts.length === 0)
+      return toast.error('Clique em "Validar e Carregar" o CSV antes de disparar');
+    if (csvContacts.length === 0 && !rawPhones.trim() && !hasList)
+      return toast.error("Adicione contatos (CSV, números ou lista)");
     if (templateHasHeaderImage && !templateHeaderImageUrl.trim())
       return toast.error("Informe a URL da imagem do header");
     if (scheduleEnabled) {
@@ -141,13 +212,17 @@ export default function Dispatch() {
       phoneNumberId: phoneNumberId.trim(),
       name: `Campanha ${templateName.trim()}`,
       message: `[Template: ${templateName.trim()}]`,
+      contacts: csvContacts.length > 0 ? csvContacts : undefined,
       rawPhones: rawPhones || undefined,
       listId: hasList ? parseInt(listId) : undefined,
       delayMin,
       delayMax,
+      rateMsgsPerMin: rate,
+      concurrency,
       useTemplate: true,
       templateName: templateName.trim(),
-      templateLanguage: "pt_BR",
+      templateLanguage: templateLanguage || "pt_BR",
+      templateVariableCount: templateVarCount,
       templateHeaderImageUrl: templateHasHeaderImage ? templateHeaderImageUrl.trim() : undefined,
       scheduledAt,
     });
@@ -159,7 +234,11 @@ export default function Dispatch() {
     setTemplateName("");
     setRawPhones("");
     setListId("");
+    setCsvText("");
+    setCsvContacts([]);
   };
+
+  const totalContacts = csvContacts.length + phoneCount;
 
   const progress = activeCampaign
     ? activeCampaign.totalContacts > 0
@@ -235,25 +314,45 @@ export default function Dispatch() {
 
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <Label className="text-xs text-muted-foreground">Template</Label>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={isSending || !credsReady || loadingTemplates}
-                      onClick={loadTemplates}
-                      className="h-7 gap-1 text-xs"
-                    >
-                      {loadingTemplates ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-3 h-3" />
+                    <Label className="text-xs text-muted-foreground">Template Name</Label>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setManualTemplate(v => !v)}
+                        disabled={isSending}
+                        className="text-xs text-primary underline disabled:opacity-50"
+                      >
+                        {manualTemplate ? "Escolher da lista" : "Digitar manualmente"}
+                      </button>
+                      {!manualTemplate && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={isSending || !credsReady || loadingTemplates}
+                          onClick={loadTemplates}
+                          className="h-7 gap-1 text-xs"
+                        >
+                          {loadingTemplates ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3 h-3" />
+                          )}
+                          {templates ? "Recarregar" : "Carregar templates"}
+                        </Button>
                       )}
-                      {templates ? "Recarregar" : "Carregar templates"}
-                    </Button>
+                    </div>
                   </div>
 
-                  {!tplReq ? (
+                  {manualTemplate ? (
+                    <Input
+                      placeholder="silva2"
+                      value={templateName}
+                      onChange={e => setTemplateName(e.target.value)}
+                      disabled={isSending}
+                      className="bg-input border-border font-mono"
+                    />
+                  ) : !tplReq ? (
                     <p className="text-xs text-muted-foreground p-2 bg-secondary/30 rounded-lg">
                       Preencha o Access Token e o Phone Number ID e clique em "Carregar templates".
                     </p>
@@ -343,15 +442,165 @@ export default function Dispatch() {
                     />
                   </div>
                 )}
+
+                {/* Language Code + Variáveis do Template */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Language Code</Label>
+                    <Select value={templateLanguage} onValueChange={setTemplateLanguage} disabled={isSending}>
+                      <SelectTrigger className="bg-input border-border">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {LANGUAGES.map(l => (
+                          <SelectItem key={l.code} value={l.code}>{l.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Variáveis do Template</Label>
+                    <Select
+                      value={String(templateVarCount)}
+                      onValueChange={v => setTemplateVarCount(parseInt(v))}
+                      disabled={isSending}
+                    >
+                      <SelectTrigger className="bg-input border-border">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Array.from({ length: 11 }, (_, i) => (
+                          <SelectItem key={i} value={String(i)}>
+                            {i === 0 ? "Sem variáveis" : `${i} variáve${i === 1 ? "l" : "is"}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {templateVarCount > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {Array.from({ length: templateVarCount }, (_, i) => (
+                      <span
+                        key={i}
+                        className="px-2 py-0.5 rounded-full bg-primary/20 text-primary text-xs font-mono"
+                      >
+                        VAR{i + 1}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Tipo de Business Manager */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Tipo de Business Manager</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(Object.keys(BM_PRESETS) as BmType[]).map(bm => (
+                      <button
+                        key={bm}
+                        type="button"
+                        disabled={isSending}
+                        onClick={() => applyBmPreset(bm)}
+                        className={`rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
+                          bmType === bm
+                            ? "border-primary bg-primary/20 text-primary"
+                            : "border-border bg-secondary/30 text-foreground hover:bg-secondary/50"
+                        }`}
+                      >
+                        {BM_PRESETS[bm].label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{BM_PRESETS[bmType].hint}</p>
+                </div>
+
+                {/* Rate + Concurrency */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Rate (msgs/min)</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={rate}
+                      onChange={e => setRate(Math.max(1, parseInt(e.target.value) || 1))}
+                      disabled={isSending}
+                      className="bg-input border-border font-mono"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Concurrency</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={concurrency}
+                      onChange={e => setConcurrency(Math.max(1, parseInt(e.target.value) || 1))}
+                      disabled={isSending}
+                      className="bg-input border-border font-mono"
+                    />
+                  </div>
+                </div>
               </CardContent>
             </Card>
 
-            {/* Contacts */}
+            {/* Upload CSV de contatos com variáveis */}
+            <Card className="bg-card border-border">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                      <Users className="w-4 h-4 text-primary" />
+                      Upload de Contatos
+                    </CardTitle>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Formato: phone,var1,var2,...,var10 (com validação)
+                    </p>
+                  </div>
+                  {csvPreviewCount > 0 && (
+                    <Badge variant="outline" className="text-xs text-primary border-primary/30">
+                      {csvPreviewCount} contato{csvPreviewCount !== 1 ? "s" : ""}
+                    </Badge>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">CSV Content</Label>
+                  <Textarea
+                    placeholder={"phone,var1,var2,var3,var4,var5,var6,var7,var8,var9,var10\n5511999999999,João,texto longo sem limite,produto,link,etc..."}
+                    value={csvText}
+                    onChange={e => setCsvText(e.target.value)}
+                    disabled={isSending}
+                    rows={5}
+                    className="bg-input border-border resize-y font-mono text-xs min-h-[110px]"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Cada coluna após o telefone vira uma variável do template ({"{{1}}"}, {"{{2}}"}...), na ordem.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  onClick={handleValidateCsv}
+                  disabled={isSending || !csvText.trim()}
+                  className="w-full gap-2 bg-emerald-500 text-white hover:bg-emerald-600 h-11 font-semibold"
+                >
+                  <Plus className="w-4 h-4" />
+                  Validar e Carregar
+                </Button>
+                {csvContacts.length > 0 && (
+                  <p className="text-xs text-emerald-400">
+                    ✓ {csvContacts.length} contato{csvContacts.length !== 1 ? "s" : ""} carregado{csvContacts.length !== 1 ? "s" : ""} e prontos para disparo.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Números avulsos e listas salvas */}
             <Card className="bg-card border-border">
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
                   <Users className="w-4 h-4 text-primary" />
-                  Contatos
+                  Números e Listas (sem variáveis)
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -603,8 +852,18 @@ export default function Dispatch() {
                 <span className="font-medium text-foreground font-mono">{phoneNumberId}</span>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Números</span>
-                <span className="font-medium text-primary">{phoneCount} contatos</span>
+                <span className="text-muted-foreground">Contatos</span>
+                <span className="font-medium text-primary">
+                  {totalContacts} {hasList ? "+ lista" : ""}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Variáveis / Idioma</span>
+                <span className="font-medium text-foreground font-mono">{templateVarCount} · {templateLanguage}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Rate / Concurrency</span>
+                <span className="font-medium text-foreground font-mono">{rate}/min · {concurrency}</span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Imagem no Header</span>
@@ -612,7 +871,9 @@ export default function Dispatch() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Ao confirmar, o disparo será iniciado imediatamente para todos os contatos.
+              {scheduleEnabled
+                ? "Ao confirmar, o disparo será agendado."
+                : "Ao confirmar, o disparo será iniciado imediatamente para todos os contatos."}
             </p>
           </div>
           <DialogFooter>

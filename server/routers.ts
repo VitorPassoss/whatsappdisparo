@@ -289,14 +289,28 @@ const campaignsRouter = router({
         message: z.string().min(1).max(200_000),
         rawPhones: z.string().optional(),
         listId: z.number().optional(),
-        // Anti-ban delay settings (seconds)
+        // Contatos com variáveis dinâmicas (vindos do CSV): cada um tem o
+        // telefone e os valores que preenchem {{1}}..{{n}} do template.
+        contacts: z
+          .array(
+            z.object({
+              phone: z.string().min(1),
+              variables: z.array(z.string()).optional().default([]),
+            })
+          )
+          .optional(),
+        // Anti-ban delay settings (seconds) — usado só quando não há rate/concurrency.
         delayMin: z.number().min(1).max(300).optional().default(3),
         delayMax: z.number().min(1).max(300).optional().default(8),
+        // Throughput: envio em paralelo (worker pool) com pacing por minuto.
+        rateMsgsPerMin: z.number().min(1).max(100_000).optional(),
+        concurrency: z.number().min(1).max(1000).optional(),
         // Template fields (optional)
         useTemplate: z.boolean().optional(),
         templateName: z.string().optional(),
         templateLanguage: z.string().optional(),
         templateVariables: z.array(z.string()).optional(),
+        templateVariableCount: z.number().min(0).max(20).optional(),
         templateHeaderImageUrl: z.string().optional(),
         scheduledAt: z.date().optional(),
       })
@@ -332,29 +346,44 @@ const campaignsRouter = router({
       }
       if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Sessão não encontrada" });
 
-      // Parse phones
-      let phones: string[] = [];
-      if (input.rawPhones) {
-        phones = parsePhones(input.rawPhones);
-      }
+      // Monta a lista unificada de contatos com variáveis. Prioridade pro CSV
+      // (que traz variáveis), depois rawPhones e listas salvas (sem variáveis).
+      // Dedup por telefone normalizado, mantendo a 1ª ocorrência.
+      const varCount = input.templateVariableCount ?? input.templateVariables?.length ?? 0;
+      const byPhone = new Map<string, string[]>();
+      const pushContact = (rawPhone: string, vars: string[]) => {
+        const phone = rawPhone.replace(/\D/g, "");
+        if (phone.length < 8 || byPhone.has(phone)) return;
+        // Normaliza pro número exato de variáveis do template (pad/trunca).
+        const norm =
+          varCount > 0 ? Array.from({ length: varCount }, (_, i) => vars[i] ?? "") : [];
+        byPhone.set(phone, norm);
+      };
+
+      for (const c of input.contacts ?? []) pushContact(c.phone, c.variables ?? []);
+      if (input.rawPhones) for (const p of parsePhones(input.rawPhones)) pushContact(p, []);
       if (input.listId) {
         const list = await getContactListById(input.listId, ctx.user.id);
         if (!list) throw new TRPCError({ code: "NOT_FOUND", message: "Lista não encontrada" });
         const listContacts = await getContactsByListId(input.listId);
-        const listPhones = listContacts.map((c) => c.phone);
-        phones = Array.from(new Set([...phones, ...listPhones]));
+        for (const c of listContacts) pushContact(c.phone, []);
       }
 
-      if (phones.length === 0)
+      const contactsList = Array.from(byPhone.entries()).map(([phone, variables]) => ({
+        phone,
+        variables,
+      }));
+
+      if (contactsList.length === 0)
         throw new TRPCError({ code: "BAD_REQUEST", message: "Nenhum número válido encontrado" });
 
       // Check credits (admin users are exempt)
       if (ctx.user.role !== "admin") {
         const credits = await getUserCredits(ctx.user.id);
-        if (credits < phones.length) {
+        if (credits < contactsList.length) {
           throw new TRPCError({
             code: "FORBIDDEN",
-            message: `Créditos insuficientes. Você tem ${credits} crédito${credits !== 1 ? "s" : ""} e está tentando enviar para ${phones.length} contato${phones.length !== 1 ? "s" : ""}. Adquira mais créditos para continuar.`,
+            message: `Créditos insuficientes. Você tem ${credits} crédito${credits !== 1 ? "s" : ""} e está tentando enviar para ${contactsList.length} contato${contactsList.length !== 1 ? "s" : ""}. Adquira mais créditos para continuar.`,
           });
         }
       }
@@ -365,15 +394,20 @@ const campaignsRouter = router({
         sessionId: session.id,
         name: input.name,
         message: input.message,
-        totalContacts: phones.length,
+        totalContacts: contactsList.length,
         scheduledAt: input.scheduledAt,
       });
 
       const campaignId = (campaignResult as { insertId: number }).insertId;
 
-      // Create contact records
+      // Create contact records (guarda as variáveis como JSON por contato)
       await createCampaignContacts(
-        phones.map((phone) => ({ campaignId, phone, status: "pending" as const }))
+        contactsList.map((c) => ({
+          campaignId,
+          phone: c.phone,
+          status: "pending" as const,
+          variables: c.variables.length > 0 ? JSON.stringify(c.variables) : null,
+        }))
       );
 
       // If scheduled for future, save as scheduled and return
@@ -386,81 +420,128 @@ const campaignsRouter = router({
       // Templates não são chunkáveis (cada um é uma unidade aprovada).
       const blocks = input.useTemplate ? [] : chunkMessage(input.message);
 
-      // Start sending asynchronously
+      // Start sending asynchronously — worker pool com pacing por minuto.
       (async () => {
         await updateCampaignStatus(campaignId, "running");
         const contacts = await getCampaignContacts(campaignId);
+
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const isTemplate = !!(input.useTemplate && input.templateName);
+
+        // Throughput: nº de workers e intervalo global entre disparos.
+        const workers = Math.max(1, Math.min(input.concurrency ?? 1, 1000));
+        const intervalMs = input.rateMsgsPerMin
+          ? Math.max(0, Math.floor(60_000 / input.rateMsgsPerMin))
+          : 0;
+
+        // Pacer global: garante no máx. 1 disparo a cada intervalMs, mesmo
+        // com vários workers (JS é single-thread, então o claim é atômico).
+        let nextSlot = Date.now();
+        const acquireSlot = async () => {
+          if (intervalMs <= 0) return;
+          const now = Date.now();
+          const wait = Math.max(0, nextSlot - now);
+          nextSlot = Math.max(now, nextSlot) + intervalMs;
+          if (wait > 0) await sleep(wait);
+        };
+
         let successCount = 0;
         let errorCount = 0;
+        let cursor = 0;
+        let stopped = false;
 
-        for (const contact of contacts) {
-          const isTemplate = !!(input.useTemplate && input.templateName);
-          const result = isTemplate
-            ? await sendWhatsAppTemplate(
-                session.accessToken,
-                session.phoneNumberId,
-                contact.phone,
-                input.templateName!,
-                input.templateLanguage ?? "pt_BR",
-                input.templateVariables ?? [],
-                input.templateHeaderImageUrl
-              )
-            : await sendWhatsAppBlocks(
-                session.accessToken,
-                session.phoneNumberId,
-                contact.phone,
-                blocks
-              );
+        const worker = async () => {
+          while (!stopped) {
+            const i = cursor++;
+            if (i >= contacts.length) return;
+            const contact = contacts[i];
 
-          // Normaliza o id do primeiro bloco como messageId do contato.
-          const firstMessageId = "messageIds" in result
-            ? result.messageIds[0]
-            : result.messageId;
+            await acquireSlot();
+            if (stopped) return;
 
-          if (result.success) {
-            successCount++;
-            await updateContactStatus(contact.id, "sent", {
-              messageId: firstMessageId,
-              sentAt: new Date(),
-            });
-            await incrementCampaignCounts(campaignId, {
-              sentCount: 1,
-              successCount: 1,
-              pendingCount: -1,
-            });
-            // Deduct 1 credit per successful send (admin exempt)
-            if (ctx.user.role !== "admin") {
-              await deductCredits(ctx.user.id, 1);
+            // Variáveis específicas deste contato (do CSV); fallback pro global.
+            let vars: string[] = input.templateVariables ?? [];
+            if (contact.variables) {
+              try {
+                const parsed = JSON.parse(contact.variables);
+                if (Array.isArray(parsed)) vars = parsed.map((v) => String(v));
+              } catch {
+                /* mantém fallback */
+              }
             }
-          } else {
-            errorCount++;
-            await updateContactStatus(contact.id, "failed", {
-              errorMessage: result.error,
-            });
-            await incrementCampaignCounts(campaignId, {
-              sentCount: 1,
-              errorCount: 1,
-              pendingCount: -1,
-            });
-          }
 
-          // Anti-ban: random delay between messages (configurable)
-          const delayMin = (input.delayMin ?? 3) * 1000;
-          const delayMax = (input.delayMax ?? 8) * 1000;
-          const delay = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
-          await new Promise((r) => setTimeout(r, delay));
+            const result = isTemplate
+              ? await sendWhatsAppTemplate(
+                  session.accessToken,
+                  session.phoneNumberId,
+                  contact.phone,
+                  input.templateName!,
+                  input.templateLanguage ?? "pt_BR",
+                  vars,
+                  input.templateHeaderImageUrl
+                )
+              : await sendWhatsAppBlocks(
+                  session.accessToken,
+                  session.phoneNumberId,
+                  contact.phone,
+                  blocks
+                );
 
-          // Auto-pause if error rate exceeds 30% after at least 10 messages
-          const totalProcessed = successCount + errorCount;
-          if (totalProcessed >= 10 && errorCount / totalProcessed > 0.3) {
-            await updateCampaignStatus(campaignId, "failed");
-            console.error(`[Campaign ${campaignId}] Auto-paused: error rate ${Math.round(errorCount / totalProcessed * 100)}% exceeded 30%`);
-            return;
+            const firstMessageId =
+              "messageIds" in result ? result.messageIds[0] : result.messageId;
+
+            if (result.success) {
+              successCount++;
+              await updateContactStatus(contact.id, "sent", {
+                messageId: firstMessageId,
+                sentAt: new Date(),
+              });
+              await incrementCampaignCounts(campaignId, {
+                sentCount: 1,
+                successCount: 1,
+                pendingCount: -1,
+              });
+              if (ctx.user.role !== "admin") {
+                await deductCredits(ctx.user.id, 1);
+              }
+            } else {
+              errorCount++;
+              await updateContactStatus(contact.id, "failed", {
+                errorMessage: result.error,
+              });
+              await incrementCampaignCounts(campaignId, {
+                sentCount: 1,
+                errorCount: 1,
+                pendingCount: -1,
+              });
+            }
+
+            // Sem rate configurado e sequencial: mantém o delay anti-ban legado.
+            if (intervalMs <= 0 && workers === 1) {
+              const dMin = (input.delayMin ?? 3) * 1000;
+              const dMax = (input.delayMax ?? 8) * 1000;
+              await sleep(Math.floor(Math.random() * (dMax - dMin + 1)) + dMin);
+            }
+
+            // Auto-pause se taxa de erro passar de 30% após ao menos 10 envios.
+            const totalProcessed = successCount + errorCount;
+            if (totalProcessed >= 10 && errorCount / totalProcessed > 0.3) {
+              stopped = true;
+              await updateCampaignStatus(campaignId, "failed");
+              console.error(
+                `[Campaign ${campaignId}] Auto-paused: error rate ${Math.round((errorCount / totalProcessed) * 100)}% exceeded 30%`
+              );
+              return;
+            }
           }
+        };
+
+        await Promise.all(Array.from({ length: workers }, () => worker()));
+
+        if (!stopped) {
+          const finalStatus = errorCount === contacts.length ? "failed" : "completed";
+          await updateCampaignStatus(campaignId, finalStatus);
         }
-
-        const finalStatus = errorCount === contacts.length ? "failed" : "completed";
-        await updateCampaignStatus(campaignId, finalStatus);
       })().catch((err) => {
         console.error("[Campaign] Error:", err);
         updateCampaignStatus(campaignId, "failed").catch(console.error);

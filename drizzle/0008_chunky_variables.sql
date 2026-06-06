@@ -1,0 +1,1 @@
+ALTER TABLE `campaign_contacts` ADD `variables` text;

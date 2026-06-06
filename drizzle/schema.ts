@@ -93,6 +93,8 @@ export const campaignContacts = mysqlTable("campaign_contacts", {
   campaignId: int("campaignId").notNull(),
   phone: varchar("phone", { length: 32 }).notNull(),
   name: varchar("name", { length: 128 }),
+  // Variáveis dinâmicas por contato (do CSV), guardadas como JSON: ["João","link",...]
+  variables: text("variables"),
   status: mysqlEnum("status", ["pending", "sent", "delivered", "read", "failed"]).default("pending").notNull(),
   errorMessage: text("errorMessage"),
   messageId: varchar("messageId", { length: 128 }),

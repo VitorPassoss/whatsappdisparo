@@ -64,6 +64,16 @@ async function runScheduledCampaigns() {
       const blocks = isTemplate ? [] : chunkMessage(campaign.message);
 
       for (const contact of contacts) {
+        // Variáveis dinâmicas por contato (do CSV), salvas como JSON.
+        let vars: string[] = [];
+        if (contact.variables) {
+          try {
+            const parsed = JSON.parse(contact.variables);
+            if (Array.isArray(parsed)) vars = parsed.map((v) => String(v));
+          } catch {
+            /* sem variáveis */
+          }
+        }
         const result = isTemplate
           ? await sendWhatsAppTemplate(
               session.accessToken,
@@ -71,7 +81,7 @@ async function runScheduledCampaigns() {
               contact.phone,
               templateName,
               "pt_BR",
-              []
+              vars
             )
           : await sendWhatsAppBlocks(
               session.accessToken,
