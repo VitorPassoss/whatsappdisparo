@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,97 +12,33 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { Send, Zap, Users, CheckCircle2,
   XCircle, Clock, Terminal, RefreshCw, Plus, AlertTriangle,
-  CalendarClock, Calendar, Trash2
+  CalendarClock, Calendar
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { format } from "date-fns";
-import { ptBR } from "date-fns/locale";
-
-type ContactStatus = {
-  phone: string;
-  status: "pending" | "sent" | "failed";
-  error?: string;
-  time?: string;
-};
-
-// Mantém paridade com `chunkMessage` do backend (server/whatsapp-send.ts).
-// Só pra preview de quantos blocos serão disparados — o backend é a fonte
-// da verdade no envio.
-const WHATSAPP_TEXT_MAX = 4096;
-const EXPLICIT_BLOCK_SEPARATOR = /\r?\n[ \t]*---+[ \t]*\r?\n/g;
-
-function previewChunks(text: string, max = WHATSAPP_TEXT_MAX): string[] {
-  if (!text || !text.trim()) return [];
-  const explicit = text
-    .split(EXPLICIT_BLOCK_SEPARATOR)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const segments = explicit.length > 0 ? explicit : [text];
-
-  const out: string[] = [];
-  for (const segment of segments) {
-    if (segment.length <= max) {
-      out.push(segment);
-      continue;
-    }
-    let remaining = segment;
-    while (remaining.length > max) {
-      let cut = -1;
-      const para = remaining.lastIndexOf("\n\n", max);
-      if (para > max * 0.5) cut = para + 2;
-      if (cut === -1) {
-        const sent = Math.max(
-          remaining.lastIndexOf(". ", max),
-          remaining.lastIndexOf("! ", max),
-          remaining.lastIndexOf("? ", max),
-          remaining.lastIndexOf("\n", max),
-        );
-        if (sent > max * 0.5) cut = sent + 1;
-      }
-      if (cut === -1) {
-        const sp = remaining.lastIndexOf(" ", max);
-        if (sp > max * 0.5) cut = sp + 1;
-      }
-      if (cut === -1) cut = max;
-      out.push(remaining.slice(0, cut).trimEnd());
-      remaining = remaining.slice(cut).trimStart();
-    }
-    if (remaining.length > 0) out.push(remaining);
-  }
-  return out;
-}
 
 export default function Dispatch() {
   const [accessToken, setAccessToken] = useState("");
   const [phoneNumberId, setPhoneNumberId] = useState("");
-  const [campaignName, setCampaignName] = useState("");
-  const [message, setMessage] = useState("");
+  const [templateName, setTemplateName] = useState("");
+  const [templateHasHeaderImage, setTemplateHasHeaderImage] = useState(false);
+  const [templateHeaderImageUrl, setTemplateHeaderImageUrl] = useState("");
   const [rawPhones, setRawPhones] = useState("");
   const [listId, setListId] = useState<string>("");
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
   const [isSending, setIsSending] = useState(false);
-  const [delayMin, setDelayMin] = useState(3);
-  const [delayMax, setDelayMax] = useState(8);
+  const [delayMin] = useState(3);
+  const [delayMax] = useState(8);
   const consoleRef = useRef<HTMLDivElement>(null);
-
-  // Template state — nome do template digitado à mão (sem dropdown de
-  // templates aprovados). As variáveis e a imagem do header são informadas
-  // manualmente porque não há metadados do template aqui.
-  const [useTemplate, setUseTemplate] = useState(false);
-  const [templateName, setTemplateName] = useState("");
-  const [templateLanguage, setTemplateLanguage] = useState("pt_BR");
-  const [templateVariables, setTemplateVariables] = useState<string[]>([]);
-  const [templateHasHeaderImage, setTemplateHasHeaderImage] = useState(false);
-  const [templateHeaderImageUrl, setTemplateHeaderImageUrl] = useState("");
 
   const { data: contactLists } = trpc.contactLists.list.useQuery();
 
-  const { data: activeCampaign, refetch: refetchCampaign } = trpc.campaigns.get.useQuery(
+  const { data: activeCampaign } = trpc.campaigns.get.useQuery(
     { id: activeCampaignId! },
     { enabled: !!activeCampaignId, refetchInterval: activeCampaignId ? 1500 : false }
   );
 
-  const { data: campaignContacts, refetch: refetchContacts } = trpc.campaigns.getContacts.useQuery(
+  const { data: campaignContacts } = trpc.campaigns.getContacts.useQuery(
     { campaignId: activeCampaignId! },
     { enabled: !!activeCampaignId, refetchInterval: activeCampaignId ? 1500 : false }
   );
@@ -138,21 +74,20 @@ export default function Dispatch() {
     .map(s => s.trim().replace(/\D/g, ""))
     .filter(s => s.length >= 8).length;
 
-  const messageBlocks = useMemo(() => previewChunks(message), [message]);
-  const blockCount = messageBlocks.length;
-
   const [showConfirm, setShowConfirm] = useState(false);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduledDate, setScheduledDate] = useState("");
   const [scheduledTime, setScheduledTime] = useState("");
 
+  const hasList = !!listId && listId !== "none";
+
   const handleSend = () => {
     if (!accessToken.trim()) return toast.error("Informe o Access Token");
     if (!phoneNumberId.trim()) return toast.error("Informe o Phone Number ID");
-    if (!campaignName.trim()) return toast.error("Informe o nome da campanha");
-    if (useTemplate && !templateName.trim()) return toast.error("Informe o nome do template");
-    if (!useTemplate && !message.trim()) return toast.error("Informe a mensagem");
-    if (!rawPhones.trim() && !listId) return toast.error("Adicione números ou selecione uma lista");
+    if (!templateName.trim()) return toast.error("Informe o nome do template");
+    if (!rawPhones.trim() && !hasList) return toast.error("Adicione números ou selecione uma lista");
+    if (templateHasHeaderImage && !templateHeaderImageUrl.trim())
+      return toast.error("Informe a URL da imagem do header");
     if (scheduleEnabled) {
       if (!scheduledDate) return toast.error("Informe a data do agendamento");
       if (!scheduledTime) return toast.error("Informe o horário do agendamento");
@@ -170,19 +105,16 @@ export default function Dispatch() {
     sendMutation.mutate({
       accessToken: accessToken.trim(),
       phoneNumberId: phoneNumberId.trim(),
-      name: campaignName,
-      message: useTemplate
-        ? (templateName ? `[Template: ${templateName}]` : "template")
-        : message,
+      name: `Campanha ${templateName.trim()}`,
+      message: `[Template: ${templateName.trim()}]`,
       rawPhones: rawPhones || undefined,
-      listId: listId ? parseInt(listId) : undefined,
+      listId: hasList ? parseInt(listId) : undefined,
       delayMin,
       delayMax,
-      useTemplate,
-      templateName: useTemplate ? templateName.trim() : undefined,
-      templateLanguage: useTemplate ? (templateLanguage.trim() || "pt_BR") : undefined,
-      templateVariables: useTemplate ? templateVariables : undefined,
-      templateHeaderImageUrl: useTemplate && templateHasHeaderImage ? templateHeaderImageUrl : undefined,
+      useTemplate: true,
+      templateName: templateName.trim(),
+      templateLanguage: "pt_BR",
+      templateHeaderImageUrl: templateHasHeaderImage ? templateHeaderImageUrl.trim() : undefined,
       scheduledAt,
     });
   };
@@ -190,8 +122,7 @@ export default function Dispatch() {
   const handleNewDispatch = () => {
     setActiveCampaignId(null);
     setIsSending(false);
-    setCampaignName("");
-    setMessage("");
+    setTemplateName("");
     setRawPhones("");
     setListId("");
   };
@@ -235,7 +166,7 @@ export default function Dispatch() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left: Config */}
           <div className="space-y-4">
-            {/* Session */}
+            {/* Campaign config */}
             <Card className="bg-card border-border">
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm font-semibold flex items-center gap-2">
@@ -269,152 +200,43 @@ export default function Dispatch() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">Nome da Campanha</Label>
+                  <Label className="text-xs text-muted-foreground">Template Name</Label>
                   <Input
-                    placeholder="Ex: Promoção de Abril"
-                    value={campaignName}
-                    onChange={e => setCampaignName(e.target.value)}
+                    placeholder="protocolo_1"
+                    value={templateName}
+                    onChange={e => setTemplateName(e.target.value)}
                     disabled={isSending}
-                    className="bg-input border-border"
+                    className="bg-input border-border font-mono"
                   />
                 </div>
 
-                {/* Toggle de template (substitui as abas) */}
+                {/* Template tem imagem no Header */}
                 <div className="flex items-center justify-between rounded-lg border border-border bg-secondary/20 p-3">
-                  <span className="text-sm font-medium text-foreground">Usar Template Aprovado</span>
+                  <span className="text-sm font-medium text-foreground">Template tem imagem no Header</span>
                   <button
                     type="button"
-                    onClick={() => setUseTemplate(v => !v)}
+                    onClick={() => setTemplateHasHeaderImage(v => !v)}
                     disabled={isSending}
                     className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
-                      useTemplate ? "bg-primary" : "bg-muted"
+                      templateHasHeaderImage ? "bg-primary" : "bg-muted"
                     }`}
                   >
                     <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                      useTemplate ? "translate-x-4" : "translate-x-1"
+                      templateHasHeaderImage ? "translate-x-4" : "translate-x-1"
                     }`} />
                   </button>
                 </div>
 
-                {!useTemplate ? (
+                {templateHasHeaderImage && (
                   <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Mensagem</Label>
-                    <Textarea
-                      placeholder={
-                        "Digite a copy completa da mensagem. Sem limite de tamanho.\n\n" +
-                        "Dica: use uma linha contendo só --- para forçar a quebra entre blocos\n" +
-                        "que serão enviados em sequência (ex: bloco 1, separador, bloco 2)."
-                      }
-                      value={message}
-                      onChange={e => setMessage(e.target.value)}
+                    <Label className="text-xs text-muted-foreground">URL da Imagem do Header</Label>
+                    <Input
+                      placeholder="https://exemplo.com/imagem.jpg"
+                      value={templateHeaderImageUrl}
+                      onChange={e => setTemplateHeaderImageUrl(e.target.value)}
                       disabled={isSending}
-                      rows={8}
-                      className="bg-input border-border resize-y min-h-[160px] font-mono text-sm"
+                      className="bg-input border-border text-xs"
                     />
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>
-                        Mensagens longas são divididas em <strong className="text-foreground">{blockCount || 0} bloco{blockCount === 1 ? "" : "s"}</strong> e entregues em ordem.
-                      </span>
-                      <span className="font-mono">{message.length.toLocaleString("pt-BR")} caracteres</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-muted-foreground">Template Name</Label>
-                      <Input
-                        placeholder="protocolo_1"
-                        value={templateName}
-                        onChange={e => setTemplateName(e.target.value)}
-                        disabled={isSending}
-                        className="bg-input border-border font-mono"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-muted-foreground">Idioma do Template</Label>
-                      <Input
-                        placeholder="pt_BR"
-                        value={templateLanguage}
-                        onChange={e => setTemplateLanguage(e.target.value)}
-                        disabled={isSending}
-                        className="bg-input border-border font-mono"
-                      />
-                    </div>
-
-                    {/* Template tem imagem no Header */}
-                    <div className="flex items-center justify-between rounded-lg border border-border bg-secondary/20 p-3">
-                      <span className="text-sm font-medium text-foreground">Template tem imagem no Header</span>
-                      <button
-                        type="button"
-                        onClick={() => setTemplateHasHeaderImage(v => !v)}
-                        disabled={isSending}
-                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
-                          templateHasHeaderImage ? "bg-primary" : "bg-muted"
-                        }`}
-                      >
-                        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                          templateHasHeaderImage ? "translate-x-4" : "translate-x-1"
-                        }`} />
-                      </button>
-                    </div>
-
-                    {templateHasHeaderImage && (
-                      <div className="space-y-1.5">
-                        <Label className="text-xs text-muted-foreground">URL da Imagem do Header</Label>
-                        <Input
-                          placeholder="https://exemplo.com/imagem.jpg"
-                          value={templateHeaderImageUrl}
-                          onChange={e => setTemplateHeaderImageUrl(e.target.value)}
-                          disabled={isSending}
-                          className="bg-input border-border text-xs"
-                        />
-                      </div>
-                    )}
-
-                    {/* Variáveis do template (adicionadas manualmente) */}
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs text-muted-foreground">Variáveis do Template (opcional)</Label>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={isSending}
-                          onClick={() => setTemplateVariables(v => [...v, ""])}
-                          className="h-7 gap-1 text-xs"
-                        >
-                          <Plus className="w-3 h-3" />
-                          Variável
-                        </Button>
-                      </div>
-                      {templateVariables.map((value, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <span className="text-xs text-primary font-mono w-8 shrink-0">{`{{${i + 1}}}`}</span>
-                          <Input
-                            placeholder={`Valor para {{${i + 1}}}`}
-                            value={value}
-                            onChange={e => {
-                              const updated = [...templateVariables];
-                              updated[i] = e.target.value;
-                              setTemplateVariables(updated);
-                            }}
-                            disabled={isSending}
-                            className="bg-input border-border text-xs"
-                          />
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            disabled={isSending}
-                            onClick={() => setTemplateVariables(v => v.filter((_, idx) => idx !== i))}
-                            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-red-400"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
                   </div>
                 )}
               </CardContent>
@@ -669,38 +491,21 @@ export default function Dispatch() {
           <div className="space-y-3">
             <div className="p-3 rounded-lg bg-secondary/50 space-y-2">
               <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Campanha</span>
-                <span className="font-medium text-foreground">{campaignName}</span>
+                <span className="text-muted-foreground">Template</span>
+                <span className="font-medium text-primary font-mono">{templateName}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Phone Number ID</span>
+                <span className="font-medium text-foreground font-mono">{phoneNumberId}</span>
               </div>
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Números</span>
                 <span className="font-medium text-primary">{phoneCount} contatos</span>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Phone Number ID</span>
-                <span className="font-medium text-foreground font-mono">{phoneNumberId}</span>
+                <span className="text-muted-foreground">Imagem no Header</span>
+                <span className="font-medium text-foreground">{templateHasHeaderImage ? "Sim" : "Não"}</span>
               </div>
-              {useTemplate ? (
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Template</span>
-                  <span className="font-medium text-primary font-mono">{templateName}</span>
-                </div>
-              ) : blockCount > 1 && (
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Blocos por contato</span>
-                  <span className="font-medium text-primary">{blockCount}</span>
-                </div>
-              )}
-            </div>
-            <div className="p-3 rounded-lg bg-secondary/30 border border-border">
-              <p className="text-xs text-muted-foreground mb-1">
-                {useTemplate
-                  ? "Template"
-                  : `Mensagem${blockCount > 1 ? ` · ${blockCount} blocos sequenciais` : ""}`}
-              </p>
-              <p className="text-sm text-foreground line-clamp-3">
-                {useTemplate ? templateName : message}
-              </p>
             </div>
             <p className="text-xs text-muted-foreground">
               Ao confirmar, o disparo será iniciado imediatamente para todos os contatos.
