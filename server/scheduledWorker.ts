@@ -38,6 +38,12 @@ async function runScheduledCampaigns() {
     );
 
   for (const campaign of due) {
+    // Campanhas Evolution (multi-chip) não têm sessão única e não passam por
+    // este worker — o disparo é imediato pelo evolutionRouter. Pula com segurança.
+    if (campaign.engine === "evolution" || campaign.sessionId == null) {
+      console.warn(`[ScheduledWorker] Pulando campanha ${campaign.id} (engine=${campaign.engine})`);
+      continue;
+    }
     console.log(`[ScheduledWorker] Starting campaign ${campaign.id}: ${campaign.name}`);
 
     try {

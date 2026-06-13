@@ -16,7 +16,9 @@ type SettingKey =
   | "FACEBOOK_APP_SECRET"
   | "WHATSAPP_WEBHOOK_TOKEN"
   | "APP_ORIGIN"
-  | "OWNER_OPEN_ID";
+  | "OWNER_OPEN_ID"
+  | "EVOLUTION_API_URL"
+  | "EVOLUTION_API_KEY";
 
 type FieldConfig = {
   key: SettingKey;
@@ -58,6 +60,19 @@ const FIELDS: FieldConfig[] = [
     label: "Owner Open ID (opcional)",
     description: "OpenId que é automaticamente promovido a admin no login. Em geral deixe vazio.",
     placeholder: "email:seu@email.com",
+  },
+  {
+    key: "EVOLUTION_API_URL",
+    label: "Evolution API — URL do servidor",
+    description: "URL base do seu servidor Evolution API (sem barra no final). Ex: https://evo.seudominio.com",
+    placeholder: "https://evo.seudominio.com",
+  },
+  {
+    key: "EVOLUTION_API_KEY",
+    label: "Evolution API — Global API Key",
+    description: "A AUTHENTICATION_API_KEY global do servidor Evolution. Usada para criar e operar todos os chips.",
+    placeholder: "•••••••••••••••",
+    secret: true,
   },
 ];
 

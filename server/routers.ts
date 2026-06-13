@@ -53,7 +53,30 @@ import {
   sendWhatsAppMessage,
   sendWhatsAppTemplate,
 } from "./whatsapp-send";
-import { getAllSettings, setSetting, type SettingKey } from "./settings";
+import {
+  createEvolutionCampaign,
+  createEvolutionInstance,
+  deleteEvolutionInstance,
+  evolutionRemainingToday,
+  getEvolutionInstanceById,
+  getEvolutionInstancesByIds,
+  getEvolutionInstancesByUserId,
+  recordEvolutionSend,
+  setContactInstance,
+  updateEvolutionInstance,
+} from "./db";
+import {
+  applySpintax,
+  applyVariables,
+  evoConnect,
+  evoConnectionState,
+  evoCreateInstance,
+  evoDeleteInstance,
+  evoFetchInstance,
+  evoSendBlocks,
+  type EvoConfig,
+} from "./evolution-api";
+import { getAllSettings, getEvolutionConfig, setSetting, type SettingKey } from "./settings";
 
 // ─── WhatsApp Template metadata fetcher ─────────────────────────────────────
 
@@ -620,6 +643,342 @@ const templatesRouter = router({
     }),
 });
 
+// ─── Evolution API Router (chips não-oficiais multi-número) ──────────────────
+
+function slugify(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "") // remove acentos/diacríticos (marcas combinantes)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 32);
+}
+
+async function requireEvoConfig(): Promise<EvoConfig> {
+  const config = await getEvolutionConfig();
+  if (!config) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message:
+        "Servidor Evolution não configurado. Um admin precisa definir EVOLUTION_API_URL e EVOLUTION_API_KEY em Configurações.",
+    });
+  }
+  return config;
+}
+
+const evolutionRouter = router({
+  // Status da configuração do servidor (sem expor a apikey).
+  config: protectedProcedure.query(async () => {
+    const config = await getEvolutionConfig();
+    return {
+      configured: !!config,
+      baseUrl: config?.baseUrl ?? null,
+    };
+  }),
+
+  // ─── Chips / instâncias ───────────────────────────────────────────────────
+  listInstances: protectedProcedure.query(({ ctx }) =>
+    getEvolutionInstancesByUserId(ctx.user.id),
+  ),
+
+  createInstance: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().min(1).max(128),
+        dailyLimit: z.number().min(1).max(2000).optional().default(80),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const config = await requireEvoConfig();
+      // Nome técnico único da instância no servidor Evolution.
+      const instanceName = `chip_${ctx.user.id}_${slugify(input.name) || "chip"}_${Date.now().toString(36)}`;
+
+      const created = await evoCreateInstance(config, instanceName);
+      if (!created.success) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: created.error ?? "Falha ao criar instância na Evolution" });
+      }
+
+      const id = await createEvolutionInstance({
+        userId: ctx.user.id,
+        name: input.name,
+        instanceName,
+        status: "connecting",
+        dailyLimit: input.dailyLimit,
+      });
+      return { success: true, id, instanceName };
+    }),
+
+  // Pede o QR code / pairing code pra conectar o chip. Chamado ao abrir o modal.
+  connectInstance: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const config = await requireEvoConfig();
+      const inst = await getEvolutionInstanceById(input.id, ctx.user.id);
+      if (!inst) throw new TRPCError({ code: "NOT_FOUND", message: "Chip não encontrado" });
+
+      // Garante que a instância exista no servidor (idempotente).
+      await evoCreateInstance(config, inst.instanceName);
+      const qr = await evoConnect(config, inst.instanceName);
+      if (!qr.success) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: qr.error ?? "Falha ao gerar QR code" });
+      }
+      await updateEvolutionInstance(input.id, ctx.user.id, { status: "connecting" });
+      return { base64: qr.base64 ?? null, pairingCode: qr.pairingCode ?? null, state: qr.state ?? "connecting" };
+    }),
+
+  // Estado da conexão (polling). Quando "open", sincroniza número/perfil no banco.
+  instanceState: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .query(async ({ ctx, input }) => {
+      const config = await requireEvoConfig();
+      const inst = await getEvolutionInstanceById(input.id, ctx.user.id);
+      if (!inst) throw new TRPCError({ code: "NOT_FOUND", message: "Chip não encontrado" });
+
+      const { state } = await evoConnectionState(config, inst.instanceName);
+      const connected = state === "open";
+
+      if (connected && inst.status !== "connected") {
+        const meta = await evoFetchInstance(config, inst.instanceName);
+        await updateEvolutionInstance(input.id, ctx.user.id, {
+          status: "connected",
+          phone: meta.phone ?? inst.phone ?? null,
+          profileName: meta.profileName ?? inst.profileName ?? null,
+        });
+      } else if (!connected && state === "close" && inst.status === "connected") {
+        await updateEvolutionInstance(input.id, ctx.user.id, { status: "disconnected" });
+      }
+
+      return { state, connected };
+    }),
+
+  updateInstance: protectedProcedure
+    .input(
+      z.object({
+        id: z.number(),
+        name: z.string().min(1).max(128).optional(),
+        dailyLimit: z.number().min(1).max(2000).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const inst = await getEvolutionInstanceById(input.id, ctx.user.id);
+      if (!inst) throw new TRPCError({ code: "NOT_FOUND" });
+      const { id, ...data } = input;
+      await updateEvolutionInstance(id, ctx.user.id, data);
+      return { success: true };
+    }),
+
+  deleteInstance: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const inst = await getEvolutionInstanceById(input.id, ctx.user.id);
+      if (!inst) throw new TRPCError({ code: "NOT_FOUND" });
+      const config = await getEvolutionConfig();
+      if (config) await evoDeleteInstance(config, inst.instanceName).catch(() => {});
+      await deleteEvolutionInstance(input.id, ctx.user.id);
+      return { success: true };
+    }),
+
+  // ─── Disparo multi-chip com contingência anti-ban ─────────────────────────
+  send: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().min(1).max(128),
+        // Copy livre — suporta spintax {a|b} e variáveis {{1}}..{{n}} do CSV.
+        message: z.string().min(1).max(200_000),
+        // Chips selecionados pra rodízio. O disparo é distribuído entre eles.
+        instanceIds: z.array(z.number()).min(1),
+        rawPhones: z.string().optional(),
+        listId: z.number().optional(),
+        contacts: z
+          .array(
+            z.object({
+              phone: z.string().min(1),
+              variables: z.array(z.string()).optional().default([]),
+            }),
+          )
+          .optional(),
+        // Delay aleatório entre envios de cada chip (segundos) — anti-ban.
+        delayMin: z.number().min(1).max(600).optional().default(10),
+        delayMax: z.number().min(1).max(600).optional().default(30),
+        // Simula "digitando..." antes de enviar (contingência humana).
+        simulateTyping: z.boolean().optional().default(true),
+        // Embaralha a ordem dos contatos pra não disparar em sequência óbvia.
+        shuffle: z.boolean().optional().default(true),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const config = await requireEvoConfig();
+
+      // Valida chips: precisam ser do usuário e estar conectados.
+      const instances = await getEvolutionInstancesByIds(input.instanceIds, ctx.user.id);
+      if (instances.length === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Selecione ao menos um chip" });
+      }
+      const connected = instances.filter((i) => i.status === "connected");
+      if (connected.length === 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Nenhum dos chips selecionados está conectado. Conecte ao menos um via QR code.",
+        });
+      }
+
+      // Monta a lista de contatos com variáveis (CSV > rawPhones > lista salva).
+      const byPhone = new Map<string, string[]>();
+      const pushContact = (rawPhone: string, vars: string[]) => {
+        const phone = rawPhone.replace(/\D/g, "");
+        if (phone.length < 8 || byPhone.has(phone)) return;
+        byPhone.set(phone, vars);
+      };
+      for (const c of input.contacts ?? []) pushContact(c.phone, c.variables ?? []);
+      if (input.rawPhones) for (const p of parsePhones(input.rawPhones)) pushContact(p, []);
+      if (input.listId) {
+        const list = await getContactListById(input.listId, ctx.user.id);
+        if (!list) throw new TRPCError({ code: "NOT_FOUND", message: "Lista não encontrada" });
+        const listContacts = await getContactsByListId(input.listId);
+        for (const c of listContacts) pushContact(c.phone, []);
+      }
+
+      let contactsList = Array.from(byPhone.entries()).map(([phone, variables]) => ({ phone, variables }));
+      if (contactsList.length === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Nenhum número válido encontrado" });
+      }
+
+      // Contingência: teto agregado = soma do que cada chip ainda pode enviar hoje.
+      const totalCapacity = connected.reduce((sum, i) => sum + evolutionRemainingToday(i), 0);
+      if (totalCapacity <= 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Os chips selecionados já atingiram o limite diário. Aguarde ou aumente o limite.",
+        });
+      }
+
+      // Embaralho determinístico-o-suficiente (Fisher-Yates).
+      if (input.shuffle) {
+        for (let i = contactsList.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [contactsList[i], contactsList[j]] = [contactsList[j], contactsList[i]];
+        }
+      }
+
+      // Créditos (admin isento).
+      if (ctx.user.role !== "admin") {
+        const credits = await getUserCredits(ctx.user.id);
+        if (credits < contactsList.length) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: `Créditos insuficientes. Você tem ${credits} e está tentando enviar para ${contactsList.length} contatos.`,
+          });
+        }
+      }
+
+      const campaignId = await createEvolutionCampaign({
+        userId: ctx.user.id,
+        name: input.name,
+        message: input.message,
+        totalContacts: contactsList.length,
+        instanceIds: connected.map((i) => i.id),
+      });
+
+      await createCampaignContacts(
+        contactsList.map((c) => ({
+          campaignId,
+          phone: c.phone,
+          status: "pending" as const,
+          variables: c.variables.length > 0 ? JSON.stringify(c.variables) : null,
+        })),
+      );
+
+      // Worker por chip: cada um puxa contatos de uma fila compartilhada,
+      // respeita seu próprio teto diário e espaça os envios com delay aleatório.
+      (async () => {
+        await updateCampaignStatus(campaignId, "running");
+        const contactRows = await getCampaignContacts(campaignId);
+
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const dMin = input.delayMin * 1000;
+        const dMax = Math.max(input.delayMin, input.delayMax) * 1000;
+        const randDelay = () => Math.floor(Math.random() * (dMax - dMin + 1)) + dMin;
+
+        const remaining = new Map(connected.map((i) => [i.id, evolutionRemainingToday(i)]));
+        let cursor = 0;
+        let successCount = 0;
+        let errorCount = 0;
+        let stopped = false;
+
+        const worker = async (inst: (typeof connected)[number]) => {
+          while (!stopped) {
+            if ((remaining.get(inst.id) ?? 0) <= 0) return; // chip esgotou o teto diário
+            const i = cursor++;
+            if (i >= contactRows.length) return;
+            const contact = contactRows[i];
+
+            // Variáveis do contato (CSV) + spintax resolvido a cada envio.
+            let vars: string[] = [];
+            if (contact.variables) {
+              try {
+                const parsed = JSON.parse(contact.variables);
+                if (Array.isArray(parsed)) vars = parsed.map((v) => String(v));
+              } catch {
+                /* sem variáveis */
+              }
+            }
+            const personalized = applyVariables(applySpintax(input.message), vars);
+            const blocks = chunkMessage(personalized);
+            const typingDelay = input.simulateTyping
+              ? Math.floor(Math.random() * 2300) + 1200
+              : 0;
+
+            const result = await evoSendBlocks(config, inst.instanceName, contact.phone, blocks, {
+              typingDelayMs: typingDelay,
+            });
+
+            remaining.set(inst.id, (remaining.get(inst.id) ?? 0) - 1);
+            await setContactInstance(contact.id, inst.instanceName);
+
+            if (result.success) {
+              successCount++;
+              await updateContactStatus(contact.id, "sent", {
+                messageId: result.messageIds[0],
+                sentAt: new Date(),
+              });
+              await incrementCampaignCounts(campaignId, { sentCount: 1, successCount: 1, pendingCount: -1 });
+              await recordEvolutionSend(inst.id);
+              if (ctx.user.role !== "admin") await deductCredits(ctx.user.id, 1);
+            } else {
+              errorCount++;
+              await updateContactStatus(contact.id, "failed", { errorMessage: result.error });
+              await incrementCampaignCounts(campaignId, { sentCount: 1, errorCount: 1, pendingCount: -1 });
+            }
+
+            // Auto-pausa se a taxa de erro passar de 30% após 10 envios.
+            const processed = successCount + errorCount;
+            if (processed >= 10 && errorCount / processed > 0.3) {
+              stopped = true;
+              await updateCampaignStatus(campaignId, "failed");
+              console.error(`[Evolution ${campaignId}] Auto-pausado: erro ${Math.round((errorCount / processed) * 100)}%`);
+              return;
+            }
+
+            await sleep(randDelay());
+          }
+        };
+
+        await Promise.all(connected.map((inst) => worker(inst)));
+
+        if (!stopped) {
+          const finalStatus = successCount === 0 ? "failed" : "completed";
+          await updateCampaignStatus(campaignId, finalStatus);
+        }
+      })().catch((err) => {
+        console.error("[Evolution Campaign] Error:", err);
+        updateCampaignStatus(campaignId, "failed").catch(console.error);
+      });
+
+      return { success: true, campaignId, usingChips: connected.length, capacity: totalCapacity };
+    }),
+});
+
 const dashboardRouter = router({
   stats: protectedProcedure.query(({ ctx }) => getDashboardStats(ctx.user.id)),
 });
@@ -849,6 +1208,8 @@ const EDITABLE_SETTING_KEYS = [
   "WHATSAPP_WEBHOOK_TOKEN",
   "APP_ORIGIN",
   "OWNER_OPEN_ID",
+  "EVOLUTION_API_URL",
+  "EVOLUTION_API_KEY",
 ] as const satisfies readonly SettingKey[];
 
 const settingKeySchema = z.enum(EDITABLE_SETTING_KEYS);
@@ -865,6 +1226,7 @@ const adminRouter = router({
     const SECRET_KEYS = new Set<SettingKey>([
       "FACEBOOK_APP_SECRET",
       "WHATSAPP_WEBHOOK_TOKEN",
+      "EVOLUTION_API_KEY",
     ]);
     return EDITABLE_SETTING_KEYS.map((key) => {
       const raw = all[key] ?? "";
@@ -995,6 +1357,7 @@ export const appRouter = router({
   contactLists: contactListsRouter,
   campaigns: campaignsRouter,
   templates: templatesRouter,
+  evolution: evolutionRouter,
   dashboard: dashboardRouter,
   inbox: inboxRouter,
   automations: automationsRouter,

@@ -65,11 +65,43 @@ export const contactListItems = mysqlTable("contact_list_items", {
 export type ContactListItem = typeof contactListItems.$inferSelect;
 export type InsertContactListItem = typeof contactListItems.$inferInsert;
 
+// Chips / números Evolution API (WhatsApp não-oficial via Baileys).
+// Cada linha = uma instância da Evolution conectada por QR code.
+export const evolutionInstances = mysqlTable("evolution_instances", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  // Rótulo amigável exibido na UI ("Chip 01", "Vendas SP"...).
+  name: varchar("name", { length: 128 }).notNull(),
+  // Nome único da instância dentro do servidor Evolution (slug técnico).
+  instanceName: varchar("instanceName", { length: 128 }).notNull().unique(),
+  // Número conectado (lido do perfil após o scan do QR).
+  phone: varchar("phone", { length: 32 }),
+  profileName: varchar("profileName", { length: 128 }),
+  status: mysqlEnum("status", ["disconnected", "connecting", "connected"]).default("disconnected").notNull(),
+  // Teto diário de envios deste chip (contingência anti-ban).
+  dailyLimit: int("dailyLimit").default(80).notNull(),
+  sentToday: int("sentToday").default(0).notNull(),
+  sentTotal: int("sentTotal").default(0).notNull(),
+  lastSentAt: timestamp("lastSentAt"),
+  // Marca o início da janela diária corrente, pra zerar sentToday a cada 24h.
+  dailyResetAt: timestamp("dailyResetAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type EvolutionInstance = typeof evolutionInstances.$inferSelect;
+export type InsertEvolutionInstance = typeof evolutionInstances.$inferInsert;
+
 // Campanhas de disparo
 export const campaigns = mysqlTable("campaigns", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
-  sessionId: int("sessionId").notNull(),
+  // Nullable: campanhas Evolution usam múltiplos chips, não uma única sessão.
+  sessionId: int("sessionId"),
+  // Motor de envio: API oficial Meta ou Evolution (não-oficial multi-chip).
+  engine: mysqlEnum("engine", ["official", "evolution"]).default("official").notNull(),
+  // IDs dos chips Evolution usados nesta campanha (JSON array). Null no oficial.
+  evolutionInstanceIds: text("evolutionInstanceIds"),
   name: varchar("name", { length: 128 }).notNull(),
   message: text("message").notNull(),
   status: mysqlEnum("status", ["pending", "running", "completed", "failed", "scheduled", "cancelled"]).default("pending").notNull(),
@@ -95,6 +127,8 @@ export const campaignContacts = mysqlTable("campaign_contacts", {
   name: varchar("name", { length: 128 }),
   // Variáveis dinâmicas por contato (do CSV), guardadas como JSON: ["João","link",...]
   variables: text("variables"),
+  // Em campanhas Evolution, qual chip (instanceName) efetivamente enviou.
+  instanceName: varchar("instanceName", { length: 128 }),
   status: mysqlEnum("status", ["pending", "sent", "delivered", "read", "failed"]).default("pending").notNull(),
   errorMessage: text("errorMessage"),
   messageId: varchar("messageId", { length: 128 }),

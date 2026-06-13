@@ -10,6 +10,8 @@ import Dispatch from "./pages/Dispatch";
 import History from "./pages/History";
 import ContactLists from "./pages/ContactLists";
 import Sessions from "./pages/Sessions";
+import Chips from "./pages/Chips";
+import ChipsDispatch from "./pages/ChipsDispatch";
 import FacebookCallback from "./pages/FacebookCallback";
 import Privacy from "./pages/Privacy";
 import Inbox from "./pages/Inbox";
@@ -38,6 +40,8 @@ function Router() {
       <Route path="/history" component={() => <ProtectedRoute component={History} />} />
       <Route path="/contacts" component={() => <ProtectedRoute component={ContactLists} />} />
       <Route path="/sessions" component={() => <ProtectedRoute component={Sessions} />} />
+      <Route path="/chips" component={() => <ProtectedRoute component={Chips} />} />
+      <Route path="/chips/dispatch" component={() => <ProtectedRoute component={ChipsDispatch} />} />
       <Route path="/inbox" component={() => <ProtectedRoute component={Inbox} />} />
       <Route path="/automations" component={() => <ProtectedRoute component={Automations} />} />
       <Route path="/admin" component={() => <ProtectedRoute component={Admin} />} />

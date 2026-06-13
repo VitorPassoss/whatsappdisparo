@@ -20,7 +20,9 @@ export type SettingKey =
   | "FACEBOOK_APP_SECRET"
   | "WHATSAPP_WEBHOOK_TOKEN"
   | "APP_ORIGIN"
-  | "OWNER_OPEN_ID";
+  | "OWNER_OPEN_ID"
+  | "EVOLUTION_API_URL"
+  | "EVOLUTION_API_KEY";
 
 const CACHE_TTL_MS = 30_000;
 
@@ -130,9 +132,25 @@ export async function getAllSettings(): Promise<Record<SettingKey, string | null
     "WHATSAPP_WEBHOOK_TOKEN",
     "APP_ORIGIN",
     "OWNER_OPEN_ID",
+    "EVOLUTION_API_URL",
+    "EVOLUTION_API_KEY",
   ];
   const entries = await Promise.all(keys.map(async (k) => [k, await getSetting(k)] as const));
   return Object.fromEntries(entries) as Record<SettingKey, string | null>;
+}
+
+/**
+ * Config do servidor Evolution (base URL + apikey global). Infra compartilhada
+ * por todos os chips/usuários, então mora em settings, não por instância.
+ * Retorna null se não estiver configurado.
+ */
+export async function getEvolutionConfig(): Promise<{ baseUrl: string; apiKey: string } | null> {
+  const [baseUrl, apiKey] = await Promise.all([
+    getSetting("EVOLUTION_API_URL"),
+    getSetting("EVOLUTION_API_KEY"),
+  ]);
+  if (!baseUrl || !apiKey) return null;
+  return { baseUrl, apiKey };
 }
 
 /** Invalida o cache de uma chave (chamado após update). */

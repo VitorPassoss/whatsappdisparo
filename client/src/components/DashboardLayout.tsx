@@ -24,7 +24,8 @@ import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
 import {
   LayoutDashboard, LogOut, PanelLeft, Users,
-  Zap, History, MessageSquare, Settings, Inbox, Bot, Shield, Coins
+  Zap, History, MessageSquare, Settings, Inbox, Bot, Shield, Coins,
+  Smartphone, Send
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -34,6 +35,8 @@ import { Button } from "./ui/button";
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/" },
   { icon: Zap, label: "Novo Disparo", path: "/dispatch" },
+  { icon: Smartphone, label: "Chips (Evolution)", path: "/chips" },
+  { icon: Send, label: "Disparo por Chips", path: "/chips/dispatch" },
   { icon: History, label: "Histórico", path: "/history" },
   { icon: Users, label: "Listas de Contatos", path: "/contacts" },
   { icon: Inbox, label: "Caixa de Entrada", path: "/inbox" },

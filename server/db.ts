@@ -8,10 +8,13 @@ import {
   InsertContactListItem,
   InsertUser,
   InsertWhatsappSession,
+  EvolutionInstance,
+  InsertEvolutionInstance,
   campaignContacts,
   campaigns,
   contactListItems,
   contactLists,
+  evolutionInstances,
   users,
   whatsappSessions,
 } from "../drizzle/schema";
@@ -50,6 +53,72 @@ export async function getRawConnection(): Promise<mysql.Pool | null> {
     }
   }
   return _rawPool;
+}
+
+// ─── Evolution schema bootstrap ────────────────────────────────────────────
+// Espelha a estratégia de `ensureAppSettingsTable`: cria a tabela de chips e
+// adiciona as colunas novas em campaigns/campaign_contacts em runtime, de forma
+// idempotente, pra não depender de `drizzle-kit migrate` ter rodado.
+
+let evolutionSchemaEnsured = false;
+
+async function columnExists(
+  conn: mysql.Pool,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  const [rows] = await conn.query(
+    `SELECT 1 FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`,
+    [table, column],
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+export async function ensureEvolutionSchema(): Promise<void> {
+  if (evolutionSchemaEnsured) return;
+  const conn = await getRawConnection();
+  if (!conn) return;
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS evolution_instances (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      userId INT NOT NULL,
+      name VARCHAR(128) NOT NULL,
+      instanceName VARCHAR(128) NOT NULL UNIQUE,
+      phone VARCHAR(32),
+      profileName VARCHAR(128),
+      status ENUM('disconnected','connecting','connected') NOT NULL DEFAULT 'disconnected',
+      dailyLimit INT NOT NULL DEFAULT 80,
+      sentToday INT NOT NULL DEFAULT 0,
+      sentTotal INT NOT NULL DEFAULT 0,
+      lastSentAt TIMESTAMP NULL,
+      dailyResetAt TIMESTAMP NULL,
+      createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Colunas novas em campaigns/campaign_contacts (ignora se já existem).
+  if (!(await columnExists(conn, "campaigns", "engine"))) {
+    await conn.query(
+      `ALTER TABLE campaigns ADD COLUMN engine ENUM('official','evolution') NOT NULL DEFAULT 'official'`,
+    );
+  }
+  if (!(await columnExists(conn, "campaigns", "evolutionInstanceIds"))) {
+    await conn.query(`ALTER TABLE campaigns ADD COLUMN evolutionInstanceIds TEXT`);
+  }
+  if (!(await columnExists(conn, "campaign_contacts", "instanceName"))) {
+    await conn.query(`ALTER TABLE campaign_contacts ADD COLUMN instanceName VARCHAR(128)`);
+  }
+  // sessionId passa a aceitar NULL (campanhas Evolution não têm sessão única).
+  try {
+    await conn.query(`ALTER TABLE campaigns MODIFY COLUMN sessionId INT NULL`);
+  } catch {
+    /* já é nullable ou sem permissão — segue */
+  }
+
+  evolutionSchemaEnsured = true;
 }
 
 // ─── Users ───────────────────────────────────────────────────────────────────
@@ -733,4 +802,166 @@ export async function countAdmins(): Promise<number> {
     .from(users)
     .where(eq(users.role, "admin"));
   return Number(rows[0]?.count ?? 0);
+}
+
+// ─── Evolution Instances (Chips) ────────────────────────────────────────────
+
+export async function createEvolutionInstance(
+  data: InsertEvolutionInstance,
+): Promise<number> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const [result] = await db.insert(evolutionInstances).values(data);
+  return (result as { insertId: number }).insertId;
+}
+
+export async function getEvolutionInstancesByUserId(
+  userId: number,
+): Promise<EvolutionInstance[]> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(evolutionInstances)
+    .where(eq(evolutionInstances.userId, userId))
+    .orderBy(desc(evolutionInstances.createdAt));
+}
+
+export async function getEvolutionInstanceById(
+  id: number,
+  userId: number,
+): Promise<EvolutionInstance | undefined> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db
+    .select()
+    .from(evolutionInstances)
+    .where(and(eq(evolutionInstances.id, id), eq(evolutionInstances.userId, userId)))
+    .limit(1);
+  return rows[0];
+}
+
+export async function getEvolutionInstancesByIds(
+  ids: number[],
+  userId: number,
+): Promise<EvolutionInstance[]> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db || ids.length === 0) return [];
+  const all = await db
+    .select()
+    .from(evolutionInstances)
+    .where(eq(evolutionInstances.userId, userId));
+  const set = new Set(ids);
+  return all.filter((i) => set.has(i.id));
+}
+
+export async function updateEvolutionInstance(
+  id: number,
+  userId: number,
+  data: Partial<{
+    name: string;
+    phone: string | null;
+    profileName: string | null;
+    status: "disconnected" | "connecting" | "connected";
+    dailyLimit: number;
+  }>,
+): Promise<void> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db
+    .update(evolutionInstances)
+    .set(data)
+    .where(and(eq(evolutionInstances.id, id), eq(evolutionInstances.userId, userId)));
+}
+
+export async function deleteEvolutionInstance(id: number, userId: number): Promise<void> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  await db
+    .delete(evolutionInstances)
+    .where(and(eq(evolutionInstances.id, id), eq(evolutionInstances.userId, userId)));
+}
+
+/**
+ * Registra um envio bem-sucedido num chip: incrementa contadores e zera o
+ * contador diário se a janela de 24h já virou. Mantém o teto diário honesto
+ * mesmo entre disparos diferentes.
+ */
+export async function recordEvolutionSend(id: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  const rows = await db
+    .select()
+    .from(evolutionInstances)
+    .where(eq(evolutionInstances.id, id))
+    .limit(1);
+  const inst = rows[0];
+  if (!inst) return;
+
+  const now = new Date();
+  const resetAt = inst.dailyResetAt ? new Date(inst.dailyResetAt) : null;
+  const windowExpired = !resetAt || now.getTime() - resetAt.getTime() >= 24 * 60 * 60 * 1000;
+
+  await db
+    .update(evolutionInstances)
+    .set({
+      sentToday: windowExpired ? 1 : sql`sentToday + 1`,
+      sentTotal: sql`sentTotal + 1`,
+      lastSentAt: now,
+      ...(windowExpired ? { dailyResetAt: now } : {}),
+    })
+    .where(eq(evolutionInstances.id, id));
+}
+
+/** Quanto ainda dá pra enviar hoje neste chip, respeitando a janela de 24h. */
+export function evolutionRemainingToday(inst: EvolutionInstance, now: Date = new Date()): number {
+  const resetAt = inst.dailyResetAt ? new Date(inst.dailyResetAt) : null;
+  const windowExpired = !resetAt || now.getTime() - resetAt.getTime() >= 24 * 60 * 60 * 1000;
+  const usedToday = windowExpired ? 0 : inst.sentToday;
+  return Math.max(0, inst.dailyLimit - usedToday);
+}
+
+// ─── Evolution Campaigns ────────────────────────────────────────────────────
+
+export async function createEvolutionCampaign(data: {
+  userId: number;
+  name: string;
+  message: string;
+  totalContacts: number;
+  instanceIds: number[];
+}): Promise<number> {
+  await ensureEvolutionSchema();
+  const db = await getDb();
+  if (!db) throw new Error("DB not available");
+  const [result] = await db.insert(campaigns).values({
+    userId: data.userId,
+    sessionId: null,
+    engine: "evolution",
+    evolutionInstanceIds: JSON.stringify(data.instanceIds),
+    name: data.name,
+    message: data.message,
+    status: "pending",
+    totalContacts: data.totalContacts,
+    sentCount: 0,
+    successCount: 0,
+    errorCount: 0,
+    pendingCount: data.totalContacts,
+  });
+  return (result as { insertId: number }).insertId;
+}
+
+/** Marca qual chip enviou um contato (visibilidade no console/histórico). */
+export async function setContactInstance(contactId: number, instanceName: string): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .update(campaignContacts)
+    .set({ instanceName })
+    .where(eq(campaignContacts.id, contactId));
 }
