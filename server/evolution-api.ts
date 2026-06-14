@@ -347,6 +347,71 @@ export async function evoSendText(
   }
 }
 
+/**
+ * Botão de uma mensagem interativa. A Evolution v2 aceita tipos mistos
+ * (resposta rápida, link, ligação, copiar código) na mesma mensagem.
+ */
+export type EvoButton =
+  | { type: "reply"; text: string }
+  | { type: "url"; text: string; url: string }
+  | { type: "call"; text: string; phone: string }
+  | { type: "copy"; text: string; copyCode: string };
+
+/**
+ * Envia uma mensagem com botões (CTA/resposta rápida) por uma instância.
+ * `description` é o corpo da copy; `footer`/`title` são opcionais. WhatsApp
+ * limita a 3 botões por mensagem.
+ */
+export async function evoSendButtons(
+  config: EvoConfig,
+  instanceName: string,
+  to: string,
+  opts: {
+    description: string;
+    title?: string;
+    footer?: string;
+    buttons: EvoButton[];
+    typingDelayMs?: number;
+  },
+): Promise<EvoSendResult> {
+  const number = to.replace(/\D/g, "");
+  // Formato Evolution v2: cada botão tem `type` + `displayText` + campo extra.
+  const buttons = opts.buttons.slice(0, 3).map((b, i) => {
+    switch (b.type) {
+      case "url":
+        return { type: "url", displayText: b.text, url: b.url };
+      case "call":
+        return { type: "call", displayText: b.text, phoneNumber: b.phone };
+      case "copy":
+        return { type: "copy", displayText: b.text, copyCode: b.copyCode };
+      default:
+        return { type: "reply", displayText: b.text, id: String(i + 1) };
+    }
+  });
+
+  try {
+    const { ok, status, data } = await evoFetch(
+      config,
+      `/message/sendButtons/${encodeURIComponent(instanceName)}`,
+      {
+        method: "POST",
+        body: {
+          number,
+          ...(opts.title ? { title: opts.title } : {}),
+          description: opts.description,
+          ...(opts.footer ? { footer: opts.footer } : {}),
+          buttons,
+          ...(opts.typingDelayMs && opts.typingDelayMs > 0 ? { delay: opts.typingDelayMs } : {}),
+        },
+      },
+    );
+    if (!ok) return { success: false, error: extractError(data, status) };
+    return { success: true, messageId: extractMessageId(data) };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
 /** Envia uma mídia (imagem) com caption opcional por uma instância. */
 export async function evoSendMedia(
   config: EvoConfig,

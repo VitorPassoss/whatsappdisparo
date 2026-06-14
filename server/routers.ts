@@ -74,6 +74,8 @@ import {
   evoDeleteInstance,
   evoFetchInstance,
   evoSendBlocks,
+  evoSendButtons,
+  type EvoButton,
   type EvoConfig,
 } from "./evolution-api";
 import { getAllSettings, getEvolutionConfig, setSetting, type SettingKey } from "./settings";
@@ -805,6 +807,21 @@ const evolutionRouter = router({
         simulateTyping: z.boolean().optional().default(true),
         // Embaralha a ordem dos contatos pra não disparar em sequência óbvia.
         shuffle: z.boolean().optional().default(true),
+        // Botões interativos (CTA/link e resposta rápida). Até 3 por mensagem.
+        // Quando presentes, a copy vira a "description" do balão de botões.
+        buttons: z
+          .array(
+            z.object({
+              type: z.enum(["reply", "url", "call", "copy"]),
+              text: z.string().min(1).max(60),
+              url: z.string().optional(),
+              phone: z.string().optional(),
+              copyCode: z.string().optional(),
+            }),
+          )
+          .max(3)
+          .optional(),
+        footer: z.string().max(60).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -923,15 +940,36 @@ const evolutionRouter = router({
                 /* sem variáveis */
               }
             }
-            const personalized = applyVariables(applySpintax(input.message), vars);
-            const blocks = chunkMessage(personalized);
+            const personalize = (s: string) => applyVariables(applySpintax(s), vars);
+            const personalized = personalize(input.message);
             const typingDelay = input.simulateTyping
               ? Math.floor(Math.random() * 2300) + 1200
               : 0;
 
-            const result = await evoSendBlocks(config, inst.instanceName, contact.phone, blocks, {
-              typingDelayMs: typingDelay,
-            });
+            // Com botões: uma mensagem interativa (copy = description). Sem
+            // botões: copy livre segmentada em blocos ordenados.
+            let result: { success: boolean; error?: string; messageId?: string };
+            if (input.buttons && input.buttons.length > 0) {
+              const buttons: EvoButton[] = input.buttons.map((b) => {
+                const text = personalize(b.text);
+                if (b.type === "url") return { type: "url", text, url: personalize(b.url ?? "") };
+                if (b.type === "call") return { type: "call", text, phone: (b.phone ?? "").replace(/\D/g, "") };
+                if (b.type === "copy") return { type: "copy", text, copyCode: personalize(b.copyCode ?? "") };
+                return { type: "reply", text };
+              });
+              result = await evoSendButtons(config, inst.instanceName, contact.phone, {
+                description: personalized,
+                footer: input.footer ? personalize(input.footer) : undefined,
+                buttons,
+                typingDelayMs: typingDelay,
+              });
+            } else {
+              const blocks = chunkMessage(personalized);
+              const blocksResult = await evoSendBlocks(config, inst.instanceName, contact.phone, blocks, {
+                typingDelayMs: typingDelay,
+              });
+              result = { success: blocksResult.success, error: blocksResult.error, messageId: blocksResult.messageIds[0] };
+            }
 
             remaining.set(inst.id, (remaining.get(inst.id) ?? 0) - 1);
             await setContactInstance(contact.id, inst.instanceName);
@@ -939,7 +977,7 @@ const evolutionRouter = router({
             if (result.success) {
               successCount++;
               await updateContactStatus(contact.id, "sent", {
-                messageId: result.messageIds[0],
+                messageId: result.messageId,
                 sentAt: new Date(),
               });
               await incrementCampaignCounts(campaignId, { sentCount: 1, successCount: 1, pendingCount: -1 });

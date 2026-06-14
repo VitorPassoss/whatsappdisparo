@@ -14,11 +14,15 @@ import { toast } from "sonner";
 import {
   Send, Zap, Users, CheckCircle2, XCircle, Clock, Terminal,
   RefreshCw, Plus, AlertTriangle, Smartphone, Wifi, WifiOff,
-  Shield, Sparkles, Loader2,
+  Shield, Sparkles, Loader2, MousePointerClick, Trash2, Link2,
+  MessageSquare, Phone,
 } from "lucide-react";
 import { format } from "date-fns";
 
 type CsvContact = { phone: string; variables: string[] };
+
+type ButtonType = "reply" | "url" | "call";
+type DispatchButton = { type: ButtonType; text: string; url: string; phone: string };
 
 // Parse de CSV `phone,var1,...`. Pula header opcional e linhas sem telefone.
 function parseCsv(text: string): CsvContact[] {
@@ -48,6 +52,9 @@ export default function ChipsDispatch() {
   const [delayMax, setDelayMax] = useState(30);
   const [simulateTyping, setSimulateTyping] = useState(true);
   const [shuffle, setShuffle] = useState(true);
+  // Botões interativos (CTA/link, resposta rápida, ligação)
+  const [buttons, setButtons] = useState<DispatchButton[]>([]);
+  const [footer, setFooter] = useState("");
 
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -94,6 +101,14 @@ export default function ChipsDispatch() {
     setSelectedChips((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  const addButton = () => {
+    if (buttons.length >= 3) return toast.error("Máximo de 3 botões por mensagem");
+    setButtons((prev) => [...prev, { type: "url", text: "", url: "", phone: "" }]);
+  };
+  const updateButton = (i: number, patch: Partial<DispatchButton>) =>
+    setButtons((prev) => prev.map((b, idx) => (idx === i ? { ...b, ...patch } : b)));
+  const removeButton = (i: number) => setButtons((prev) => prev.filter((_, idx) => idx !== i));
+
   const handleValidateCsv = () => {
     const parsed = parseCsv(csvText);
     if (parsed.length === 0) {
@@ -129,11 +144,22 @@ export default function ChipsDispatch() {
     if (csvContacts.length === 0 && !rawPhones.trim() && !hasList)
       return toast.error("Adicione contatos (CSV, números ou lista)");
     if (delayMax < delayMin) return toast.error("O delay máximo deve ser ≥ ao mínimo");
+    for (const b of buttons) {
+      if (!b.text.trim()) return toast.error("Preencha o texto de todos os botões");
+      if (b.type === "url" && !b.url.trim()) return toast.error("Botão de link precisa de uma URL");
+      if (b.type === "call" && !b.phone.trim()) return toast.error("Botão de ligação precisa de um número");
+    }
     setShowConfirm(true);
   };
 
   const handleConfirmSend = () => {
     setShowConfirm(false);
+    const cleanButtons = buttons.map((b) => ({
+      type: b.type,
+      text: b.text.trim(),
+      url: b.type === "url" ? b.url.trim() : undefined,
+      phone: b.type === "call" ? b.phone.replace(/\D/g, "") : undefined,
+    }));
     sendMutation.mutate({
       name: name.trim(),
       message: message.trim(),
@@ -145,6 +171,8 @@ export default function ChipsDispatch() {
       delayMax,
       simulateTyping,
       shuffle,
+      buttons: cleanButtons.length > 0 ? cleanButtons : undefined,
+      footer: footer.trim() || undefined,
     });
   };
 
@@ -157,6 +185,8 @@ export default function ChipsDispatch() {
     setListId("");
     setCsvText("");
     setCsvContacts([]);
+    setButtons([]);
+    setFooter("");
   };
 
   const progress = activeCampaign
@@ -290,6 +320,118 @@ export default function ChipsDispatch() {
                     <code className="font-mono">{"{{1}}"}</code> vêm do CSV · separe blocos com uma linha <code className="font-mono">---</code>
                   </p>
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Botões interativos */}
+            <Card className="bg-card border-border">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <MousePointerClick className="w-4 h-4 text-primary" />
+                    Botões (opcional)
+                  </CardTitle>
+                  <Badge variant="outline" className="text-xs text-muted-foreground border-border">
+                    {buttons.length}/3
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {buttons.length === 0 && (
+                  <p className="text-xs text-muted-foreground p-3 bg-secondary/30 rounded-lg">
+                    Adicione botões de <strong>Link (CTA)</strong>, <strong>Resposta rápida</strong> ou{" "}
+                    <strong>Ligação</strong> abaixo da mensagem — como "GARANTIR VAGA" e "Sair".
+                  </p>
+                )}
+
+                {buttons.map((btn, i) => (
+                  <div key={i} className="rounded-lg border border-border bg-secondary/20 p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={btn.type}
+                        onValueChange={(v) => updateButton(i, { type: v as ButtonType })}
+                        disabled={isSending}
+                      >
+                        <SelectTrigger className="bg-input border-border h-9 w-40 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="url">
+                            <span className="flex items-center gap-2"><Link2 className="w-3.5 h-3.5" /> Link (CTA)</span>
+                          </SelectItem>
+                          <SelectItem value="reply">
+                            <span className="flex items-center gap-2"><MessageSquare className="w-3.5 h-3.5" /> Resposta rápida</span>
+                          </SelectItem>
+                          <SelectItem value="call">
+                            <span className="flex items-center gap-2"><Phone className="w-3.5 h-3.5" /> Ligação</span>
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        placeholder="Texto do botão (ex: GARANTIR VAGA)"
+                        value={btn.text}
+                        maxLength={60}
+                        onChange={(e) => updateButton(i, { text: e.target.value })}
+                        disabled={isSending}
+                        className="bg-input border-border flex-1 h-9 text-sm"
+                      />
+                      <button
+                        onClick={() => removeButton(i)}
+                        disabled={isSending}
+                        className="p-1.5 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors shrink-0"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                    {btn.type === "url" && (
+                      <Input
+                        placeholder="https://seulink.com/checkout"
+                        value={btn.url}
+                        onChange={(e) => updateButton(i, { url: e.target.value })}
+                        disabled={isSending}
+                        className="bg-input border-border h-9 text-xs font-mono"
+                      />
+                    )}
+                    {btn.type === "call" && (
+                      <Input
+                        placeholder="5511999999999"
+                        value={btn.phone}
+                        onChange={(e) => updateButton(i, { phone: e.target.value })}
+                        disabled={isSending}
+                        className="bg-input border-border h-9 text-xs font-mono"
+                      />
+                    )}
+                  </div>
+                ))}
+
+                {buttons.length < 3 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={addButton}
+                    disabled={isSending}
+                    className="w-full gap-2 h-9 text-xs border-dashed"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Adicionar botão
+                  </Button>
+                )}
+
+                {buttons.length > 0 && (
+                  <div className="space-y-1.5 pt-1">
+                    <Label className="text-xs text-muted-foreground">Rodapé (footer, opcional)</Label>
+                    <Input
+                      placeholder="Ex: Oferta por tempo limitado"
+                      value={footer}
+                      maxLength={60}
+                      onChange={(e) => setFooter(e.target.value)}
+                      disabled={isSending}
+                      className="bg-input border-border h-9 text-sm"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Spintax e variáveis <code className="font-mono">{"{{1}}"}</code> também funcionam no texto e na URL dos botões.
+                    </p>
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -558,6 +700,9 @@ export default function ChipsDispatch() {
               <div className="flex justify-between"><span className="text-muted-foreground">Contatos</span><span className="font-medium text-primary">{totalContacts}{hasList ? " + lista" : ""}</span></div>
               <div className="flex justify-between"><span className="text-muted-foreground">Capacidade hoje</span><span className="font-medium text-foreground font-mono">{capacity}</span></div>
               <div className="flex justify-between"><span className="text-muted-foreground">Delay</span><span className="font-medium text-foreground font-mono">{delayMin}–{delayMax}s</span></div>
+              {buttons.length > 0 && (
+                <div className="flex justify-between"><span className="text-muted-foreground">Botões</span><span className="font-medium text-primary">{buttons.length}</span></div>
+              )}
             </div>
             {totalContacts > capacity && (
               <p className="text-xs text-yellow-400 flex items-start gap-1.5">
