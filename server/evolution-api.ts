@@ -82,6 +82,13 @@ function extractError(data: any, status: number): string {
     const m = data.response.message;
     return Array.isArray(m) ? m.join("; ") : String(m);
   }
+  // Último recurso: serializa o corpo (truncado) pra não esconder o erro real.
+  try {
+    const json = JSON.stringify(data);
+    if (json && json !== "{}") return `HTTP ${status}: ${json.slice(0, 300)}`;
+  } catch {
+    /* ignora */
+  }
   return `HTTP ${status}`;
 }
 
@@ -326,25 +333,37 @@ export async function evoSendText(
   typingDelayMs = 0,
 ): Promise<EvoSendResult> {
   const number = to.replace(/\D/g, "");
-  try {
-    const { ok, status, data } = await evoFetch(
-      config,
-      `/message/sendText/${encodeURIComponent(instanceName)}`,
-      {
-        method: "POST",
-        body: {
-          number,
-          text,
-          // Evolution v2: `delay` (ms) mostra "digitando" antes de enviar.
-          ...(typingDelayMs > 0 ? { delay: typingDelayMs } : {}),
-        },
-      },
-    );
-    if (!ok) return { success: false, error: extractError(data, status) };
-    return { success: true, messageId: extractMessageId(data) };
-  } catch (err: unknown) {
-    return { success: false, error: err instanceof Error ? err.message : "Network error" };
+  const path = `/message/sendText/${encodeURIComponent(instanceName)}`;
+
+  // A Evolution mudou o formato do payload entre a v1 e a v2. Tentamos o
+  // formato v2 (flat) e, se falhar, caímos pro v1 (textMessage/options) —
+  // assim funciona independente da versão que o usuário hospedou.
+  const payloads: Record<string, unknown>[] = [
+    // v2: { number, text, delay }
+    { number, text, ...(typingDelayMs > 0 ? { delay: typingDelayMs } : {}) },
+    // v1: { number, textMessage: { text }, options: { delay, presence } }
+    {
+      number,
+      textMessage: { text },
+      options: typingDelayMs > 0 ? { delay: typingDelayMs, presence: "composing" } : {},
+    },
+  ];
+
+  let lastError = "Falha ao enviar";
+  for (const body of payloads) {
+    try {
+      const { ok, status, data } = await evoFetch(config, path, { method: "POST", body });
+      if (ok) return { success: true, messageId: extractMessageId(data) };
+      lastError = extractError(data, status);
+      // Erro de número inexistente / sem WhatsApp não é problema de formato —
+      // não adianta tentar a outra versão.
+      if (/exist|not found|invalid number|n[ãa]o.*whats|number.*not/i.test(lastError)) break;
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : "Network error";
+    }
   }
+  console.error(`[Evolution] sendText falhou (${instanceName} → ${number}): ${lastError}`);
+  return { success: false, error: lastError };
 }
 
 /**

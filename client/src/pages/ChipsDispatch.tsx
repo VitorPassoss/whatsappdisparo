@@ -655,7 +655,9 @@ export default function ChipsDispatch() {
                           }]</span>
                           <span className="text-foreground">{contact.phone}</span>
                           {contact.instanceName && (
-                            <span className="text-muted-foreground/50 truncate">via {contact.instanceName.split("_").slice(-2, -1)[0] ?? "chip"}</span>
+                            <span className="text-muted-foreground/50 truncate">
+                              via {(chips ?? []).find((c) => c.instanceName === contact.instanceName)?.name ?? "chip"}
+                            </span>
                           )}
                           {contact.status === "sent" || contact.status === "delivered" ? (
                             <span className="text-emerald-400 ml-auto">✓</span>
