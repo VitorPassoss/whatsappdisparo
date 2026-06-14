@@ -55,6 +55,10 @@ export default function ChipsDispatch() {
   // Botões interativos (CTA/link, resposta rápida, ligação)
   const [buttons, setButtons] = useState<DispatchButton[]>([]);
   const [footer, setFooter] = useState("");
+  const [buttonTitle, setButtonTitle] = useState("");
+  // Botão nativo (balão interativo) — exige Evolution v2.3.6+. Senão, modo
+  // compatível (links no texto). Default ligado pra quem já está na v2.3.6.
+  const [nativeButtons, setNativeButtons] = useState(true);
 
   const [activeCampaignId, setActiveCampaignId] = useState<number | null>(null);
   const [isSending, setIsSending] = useState(false);
@@ -173,6 +177,8 @@ export default function ChipsDispatch() {
       shuffle,
       buttons: cleanButtons.length > 0 ? cleanButtons : undefined,
       footer: footer.trim() || undefined,
+      buttonTitle: buttonTitle.trim() || undefined,
+      nativeButtons,
     });
   };
 
@@ -187,6 +193,7 @@ export default function ChipsDispatch() {
     setCsvContacts([]);
     setButtons([]);
     setFooter("");
+    setButtonTitle("");
   };
 
   const progress = activeCampaign
@@ -337,19 +344,61 @@ export default function ChipsDispatch() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="flex items-start gap-2 p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
-                  <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
-                  <p className="text-xs text-yellow-400/90">
-                    <strong>Modo compatível:</strong> botão nativo do WhatsApp é bloqueado pela Meta em chips
-                    não-oficiais (some com "não foi possível carregar a mensagem"). Aqui os botões viram{" "}
-                    <strong>links clicáveis no texto</strong> — chega em 100% dos aparelhos. O link de CTA aparece
-                    como linha clicável; resposta rápida vira uma linha de opção.
-                  </p>
+                {/* Toggle: botão nativo (v2.3.6+) x modo compatível (texto) */}
+                <div className="flex items-center justify-between rounded-lg border border-border bg-secondary/20 p-3">
+                  <div className="min-w-0">
+                    <span className="text-sm font-medium text-foreground">Botão nativo (balão interativo)</span>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Exige Evolution <strong>v2.3.6+</strong>. Desligado = modo compatível (links no texto).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setNativeButtons((v) => !v)}
+                    disabled={isSending}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors shrink-0 ml-3 ${nativeButtons ? "bg-primary" : "bg-muted"}`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${nativeButtons ? "translate-x-4" : "translate-x-1"}`} />
+                  </button>
                 </div>
+
+                {nativeButtons ? (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-primary/5 border border-primary/20">
+                    <AlertTriangle className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                    <p className="text-xs text-muted-foreground">
+                      <strong className="text-foreground">Botão nativo:</strong> renderiza o balão de verdade,
+                      mas só funciona se seu Evolution suportar (v2.3.6 ok; v2.3.7 quebra). Teste com 1 número
+                      antes. Limite: até <strong>2 botões de Link</strong>, evite misturar Link com Resposta rápida.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
+                    <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
+                    <p className="text-xs text-yellow-400/90">
+                      <strong>Modo compatível:</strong> os botões viram <strong>links clicáveis no texto</strong> —
+                      chega em 100% dos aparelhos, sem o visual de balão.
+                    </p>
+                  </div>
+                )}
+
+                {nativeButtons && (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Título (negrito, opcional)</Label>
+                    <Input
+                      placeholder="Ex: Oferta Especial 🔥"
+                      value={buttonTitle}
+                      maxLength={60}
+                      onChange={(e) => setButtonTitle(e.target.value)}
+                      disabled={isSending}
+                      className="bg-input border-border h-9 text-sm"
+                    />
+                  </div>
+                )}
+
                 {buttons.length === 0 && (
                   <p className="text-xs text-muted-foreground p-3 bg-secondary/30 rounded-lg">
                     Adicione botões de <strong>Link (CTA)</strong>, <strong>Resposta rápida</strong> ou{" "}
-                    <strong>Ligação</strong> — eles entram no final da mensagem como texto/links.
+                    <strong>Ligação</strong> — como "GARANTIR VAGA" e "Sair".
                   </p>
                 )}
 

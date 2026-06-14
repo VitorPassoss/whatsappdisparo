@@ -452,15 +452,21 @@ export async function evoSendButtons(
         method: "POST",
         body: {
           number,
-          ...(opts.title ? { title: opts.title } : {}),
-          description: opts.description,
+          // `title` é obrigatório no DTO da Evolution v2.3.x (SendButtonsDto).
+          // Mandamos string vazia quando o usuário não define um título.
+          title: opts.title ?? "",
+          ...(opts.description ? { description: opts.description } : {}),
           ...(opts.footer ? { footer: opts.footer } : {}),
           buttons,
           ...(opts.typingDelayMs && opts.typingDelayMs > 0 ? { delay: opts.typingDelayMs } : {}),
         },
       },
     );
-    if (!ok) return { success: false, error: extractError(data, status) };
+    if (!ok) {
+      const err = extractError(data, status);
+      console.error(`[Evolution] sendButtons falhou (${instanceName} → ${number}): ${err}`);
+      return { success: false, error: err };
+    }
     return { success: true, messageId: extractMessageId(data) };
   } catch (err: unknown) {
     return { success: false, error: err instanceof Error ? err.message : "Network error" };

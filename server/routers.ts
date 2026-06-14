@@ -74,6 +74,7 @@ import {
   evoDeleteInstance,
   evoFetchInstance,
   evoSendBlocks,
+  evoSendButtons,
   renderButtonsAsText,
   type EvoButton,
   type EvoConfig,
@@ -822,6 +823,11 @@ const evolutionRouter = router({
           .max(3)
           .optional(),
         footer: z.string().max(60).optional(),
+        // Título (negrito) acima da copy — usado no balão de botão nativo.
+        buttonTitle: z.string().max(60).optional(),
+        // true = balão de botão nativo (exige Evolution v2.3.6+ com suporte);
+        // false = modo compatível (botões viram links no texto).
+        nativeButtons: z.boolean().optional().default(false),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -946,38 +952,39 @@ const evolutionRouter = router({
               ? Math.floor(Math.random() * 2300) + 1200
               : 0;
 
-            // Modo compatível: botões viram texto/links dentro da mensagem.
-            // Mensagens interativas (sendButtons) são bloqueadas pela Meta no
-            // Baileys e mostram "não foi possível carregar a mensagem" — então
-            // renderizamos os botões como texto, que chega em 100% dos aparelhos.
-            let textToSend = personalized;
-            if (input.buttons && input.buttons.length > 0) {
-              const btns: EvoButton[] = input.buttons.map((b) => {
+            // Botões personalizados por contato (spintax/variáveis no texto e URL).
+            const btns: EvoButton[] =
+              input.buttons?.map((b) => {
                 const text = personalize(b.text);
                 if (b.type === "url") return { type: "url", text, url: personalize(b.url ?? "") };
                 if (b.type === "call") return { type: "call", text, phone: (b.phone ?? "").replace(/\D/g, "") };
                 if (b.type === "copy") return { type: "copy", text, copyCode: personalize(b.copyCode ?? "") };
                 return { type: "reply", text };
-              });
-              textToSend = renderButtonsAsText(
-                personalized,
-                btns,
-                input.footer ? personalize(input.footer) : undefined,
-              );
-            }
+              }) ?? [];
 
-            const blocksResult = await evoSendBlocks(
-              config,
-              inst.instanceName,
-              contact.phone,
-              chunkMessage(textToSend),
-              { typingDelayMs: typingDelay },
-            );
-            const result = {
-              success: blocksResult.success,
-              error: blocksResult.error,
-              messageId: blocksResult.messageIds[0],
-            };
+            let result: { success: boolean; error?: string; messageId?: string };
+            if (btns.length > 0 && input.nativeButtons) {
+              // Botão nativo (balão interativo) — exige Evolution v2.3.6+ com suporte.
+              const r = await evoSendButtons(config, inst.instanceName, contact.phone, {
+                title: input.buttonTitle ? personalize(input.buttonTitle) : "",
+                description: personalized,
+                footer: input.footer ? personalize(input.footer) : undefined,
+                buttons: btns,
+                typingDelayMs: typingDelay,
+              });
+              result = { success: r.success, error: r.error, messageId: r.messageId };
+            } else {
+              // Modo compatível: botões viram texto/links; renderiza em 100% dos
+              // aparelhos (mensagem interativa é bloqueada pela Meta no Baileys).
+              const textToSend =
+                btns.length > 0
+                  ? renderButtonsAsText(personalized, btns, input.footer ? personalize(input.footer) : undefined)
+                  : personalized;
+              const r = await evoSendBlocks(config, inst.instanceName, contact.phone, chunkMessage(textToSend), {
+                typingDelayMs: typingDelay,
+              });
+              result = { success: r.success, error: r.error, messageId: r.messageIds[0] };
+            }
 
             remaining.set(inst.id, (remaining.get(inst.id) ?? 0) - 1);
             await setContactInstance(contact.id, inst.instanceName);
