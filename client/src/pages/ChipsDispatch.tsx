@@ -337,10 +337,19 @@ export default function ChipsDispatch() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
+                  <AlertTriangle className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-yellow-400/90">
+                    <strong>Modo compatível:</strong> botão nativo do WhatsApp é bloqueado pela Meta em chips
+                    não-oficiais (some com "não foi possível carregar a mensagem"). Aqui os botões viram{" "}
+                    <strong>links clicáveis no texto</strong> — chega em 100% dos aparelhos. O link de CTA aparece
+                    como linha clicável; resposta rápida vira uma linha de opção.
+                  </p>
+                </div>
                 {buttons.length === 0 && (
                   <p className="text-xs text-muted-foreground p-3 bg-secondary/30 rounded-lg">
                     Adicione botões de <strong>Link (CTA)</strong>, <strong>Resposta rápida</strong> ou{" "}
-                    <strong>Ligação</strong> abaixo da mensagem — como "GARANTIR VAGA" e "Sair".
+                    <strong>Ligação</strong> — eles entram no final da mensagem como texto/links.
                   </p>
                 )}
 

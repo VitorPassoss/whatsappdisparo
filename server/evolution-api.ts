@@ -377,6 +377,42 @@ export type EvoButton =
   | { type: "copy"; text: string; copyCode: string };
 
 /**
+ * Modo compatível: renderiza os botões como TEXTO dentro da mensagem em vez
+ * de mandar um balão interativo. Mensagens interativas (sendButtons) são
+ * bloqueadas pela Meta no WhatsApp Web/Baileys e mostram "não foi possível
+ * carregar a mensagem" na maioria dos aparelhos. Em texto, o link vira
+ * clicável (com preview) e renderiza 100%.
+ */
+export function renderButtonsAsText(
+  description: string,
+  buttons: EvoButton[],
+  footer?: string,
+): string {
+  const parts: string[] = [];
+  const body = description.trim();
+  if (body) parts.push(body);
+
+  const lines: string[] = [];
+  for (const b of buttons) {
+    if (b.type === "url") {
+      // URL em linha própria → WhatsApp gera link clicável/preview.
+      lines.push(`👉 *${b.text}*\n${b.url}`);
+    } else if (b.type === "call") {
+      lines.push(`📞 *${b.text}*: ${b.phone}`);
+    } else {
+      // Resposta rápida não tem equivalente clicável; vira uma opção em texto.
+      lines.push(`▶️ ${b.text}`);
+    }
+  }
+  if (lines.length) parts.push(lines.join("\n\n"));
+
+  const f = footer?.trim();
+  if (f) parts.push(`_${f}_`);
+
+  return parts.join("\n\n");
+}
+
+/**
  * Envia uma mensagem com botões (CTA/resposta rápida) por uma instância.
  * `description` é o corpo da copy; `footer`/`title` são opcionais. WhatsApp
  * limita a 3 botões por mensagem.

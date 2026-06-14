@@ -74,7 +74,7 @@ import {
   evoDeleteInstance,
   evoFetchInstance,
   evoSendBlocks,
-  evoSendButtons,
+  renderButtonsAsText,
   type EvoButton,
   type EvoConfig,
 } from "./evolution-api";
@@ -946,30 +946,38 @@ const evolutionRouter = router({
               ? Math.floor(Math.random() * 2300) + 1200
               : 0;
 
-            // Com botões: uma mensagem interativa (copy = description). Sem
-            // botões: copy livre segmentada em blocos ordenados.
-            let result: { success: boolean; error?: string; messageId?: string };
+            // Modo compatível: botões viram texto/links dentro da mensagem.
+            // Mensagens interativas (sendButtons) são bloqueadas pela Meta no
+            // Baileys e mostram "não foi possível carregar a mensagem" — então
+            // renderizamos os botões como texto, que chega em 100% dos aparelhos.
+            let textToSend = personalized;
             if (input.buttons && input.buttons.length > 0) {
-              const buttons: EvoButton[] = input.buttons.map((b) => {
+              const btns: EvoButton[] = input.buttons.map((b) => {
                 const text = personalize(b.text);
                 if (b.type === "url") return { type: "url", text, url: personalize(b.url ?? "") };
                 if (b.type === "call") return { type: "call", text, phone: (b.phone ?? "").replace(/\D/g, "") };
                 if (b.type === "copy") return { type: "copy", text, copyCode: personalize(b.copyCode ?? "") };
                 return { type: "reply", text };
               });
-              result = await evoSendButtons(config, inst.instanceName, contact.phone, {
-                description: personalized,
-                footer: input.footer ? personalize(input.footer) : undefined,
-                buttons,
-                typingDelayMs: typingDelay,
-              });
-            } else {
-              const blocks = chunkMessage(personalized);
-              const blocksResult = await evoSendBlocks(config, inst.instanceName, contact.phone, blocks, {
-                typingDelayMs: typingDelay,
-              });
-              result = { success: blocksResult.success, error: blocksResult.error, messageId: blocksResult.messageIds[0] };
+              textToSend = renderButtonsAsText(
+                personalized,
+                btns,
+                input.footer ? personalize(input.footer) : undefined,
+              );
             }
+
+            const blocksResult = await evoSendBlocks(
+              config,
+              inst.instanceName,
+              contact.phone,
+              chunkMessage(textToSend),
+              { typingDelayMs: typingDelay },
+            );
+            const result = {
+              success: blocksResult.success,
+              error: blocksResult.error,
+              messageId: blocksResult.messageIds[0],
+            };
 
             remaining.set(inst.id, (remaining.get(inst.id) ?? 0) - 1);
             await setContactInstance(contact.id, inst.instanceName);
